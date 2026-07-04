@@ -16,6 +16,7 @@ pub enum ExternalChangePolicy {
     Prompt,
     Accept,
     Restore,
+    Review,
     Abort,
 }
 
@@ -52,11 +53,81 @@ pub struct DryRunReport {
 pub struct GitStatusEntry {
     pub code: String,
     pub path: String,
+    pub original_path: Option<String>,
 }
 
 impl GitStatusEntry {
     fn is_untracked(&self) -> bool {
         self.code == "??"
+    }
+
+    fn is_unmerged(&self) -> bool {
+        matches!(
+            self.code.as_str(),
+            "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU"
+        )
+    }
+
+    fn kind(&self) -> GitStatusKind {
+        if self.is_unmerged() {
+            return GitStatusKind::Unmerged;
+        }
+        if self.is_untracked() {
+            return GitStatusKind::Untracked;
+        }
+
+        let mut chars = self.code.chars();
+        let index = chars.next().unwrap_or(' ');
+        let worktree = chars.next().unwrap_or(' ');
+        match (index, worktree) {
+            ('R', _) | (_, 'R') => GitStatusKind::Renamed,
+            ('C', _) | (_, 'C') => GitStatusKind::Copied,
+            ('A', _) | (_, 'A') => GitStatusKind::Added,
+            ('D', _) | (_, 'D') => GitStatusKind::Deleted,
+            _ => GitStatusKind::Modified,
+        }
+    }
+
+    fn path_args(&self) -> Vec<&str> {
+        let mut paths = Vec::new();
+        if let Some(original_path) = &self.original_path {
+            paths.push(original_path.as_str());
+        }
+        paths.push(self.path.as_str());
+        paths
+    }
+
+    fn display_path(&self) -> String {
+        if let Some(original_path) = &self.original_path {
+            format!("{original_path} -> {}", self.path)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitStatusKind {
+    Added,
+    Copied,
+    Deleted,
+    Modified,
+    Renamed,
+    Unmerged,
+    Untracked,
+}
+
+impl GitStatusKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Copied => "copied",
+            Self::Deleted => "deleted",
+            Self::Modified => "modified",
+            Self::Renamed => "renamed",
+            Self::Unmerged => "unmerged",
+            Self::Untracked => "untracked",
+        }
     }
 }
 
@@ -112,6 +183,10 @@ pub fn dry_run(workspace: &Workspace) -> Result<DryRunReport> {
     fail_if_pending_transactions(workspace)?;
 
     let changed_paths = git_status(workspace.root())?
+        .into_iter()
+        .collect::<Vec<_>>();
+    fail_if_unmerged(&changed_paths)?;
+    let changed_paths = changed_paths
         .into_iter()
         .map(|entry| entry.path)
         .collect::<Vec<_>>();
@@ -220,13 +295,20 @@ pub fn git_status(root: &Path) -> Result<Vec<GitStatusEntry>> {
 
     Ok(parse_status_z(&output.stdout)
         .into_iter()
-        .filter(|entry| !is_excluded_relative_str(&entry.path))
+        .filter(|entry| {
+            !is_excluded_relative_str(&entry.path)
+                && entry
+                    .original_path
+                    .as_deref()
+                    .is_none_or(|path| !is_excluded_relative_str(path))
+        })
         .collect())
 }
 
 pub fn is_github_or_gitlab_remote(remote: &str) -> bool {
-    let remote = remote.to_ascii_lowercase();
-    remote.contains("github.com") || remote.contains("gitlab.com")
+    git_remote_host(remote)
+        .as_deref()
+        .is_some_and(|host| matches!(host, "github.com" | "gitlab.com"))
 }
 
 pub fn is_excluded_relative(path: &Path) -> bool {
@@ -254,6 +336,7 @@ struct Transaction {
     snapshot_dir: PathBuf,
     snapshot_files: BTreeSet<String>,
     index_snapshot: Option<PathBuf>,
+    staging_snapshot: Option<PathBuf>,
     temp_index: Option<PathBuf>,
     finished: bool,
 }
@@ -274,6 +357,7 @@ impl Transaction {
 
         let snapshot_files = snapshot_vault(workspace.root(), &snapshot_dir)?;
         let index_snapshot = snapshot_index(workspace, &tx_dir)?;
+        let staging_snapshot = snapshot_staging(workspace.root(), &tx_dir)?;
 
         Ok(Self {
             workspace: workspace.clone(),
@@ -281,6 +365,7 @@ impl Transaction {
             snapshot_dir,
             snapshot_files,
             index_snapshot,
+            staging_snapshot,
             temp_index: None,
             finished: false,
         })
@@ -327,7 +412,9 @@ impl Transaction {
         }
 
         let mut args = vec!["add", "--all", "--"];
-        args.extend(status.iter().map(|entry| entry.path.as_str()));
+        for entry in &status {
+            args.extend(entry.path_args());
+        }
         git_checked(self.workspace.root(), &args, "git add")?;
         unstage_excluded(self.workspace.root())?;
 
@@ -389,6 +476,9 @@ impl Transaction {
         if let Err(err) = unstage_all(self.workspace.root()) {
             first_error.get_or_insert(err);
         }
+        if let Err(err) = self.restore_staging() {
+            first_error.get_or_insert(err);
+        }
         if let Err(err) = self.finish() {
             first_error.get_or_insert(err);
         }
@@ -422,6 +512,20 @@ impl Transaction {
         Ok(())
     }
 
+    fn restore_staging(&self) -> Result<()> {
+        let Some(snapshot) = &self.staging_snapshot else {
+            return Ok(());
+        };
+        let snapshot = snapshot
+            .to_str()
+            .ok_or_else(|| eyre!("staging snapshot path is not valid UTF-8"))?;
+        git_checked(
+            self.workspace.root(),
+            &["apply", "--cached", "--whitespace=nowarn", snapshot],
+            "git apply staged snapshot",
+        )
+    }
+
     fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
@@ -443,10 +547,12 @@ fn resolve_external_changes(
     if entries.is_empty() {
         return Ok(());
     }
+    fail_if_unmerged(entries)?;
 
     let action = match options.external_policy {
         ExternalChangePolicy::Accept => ExternalChangePolicy::Accept,
         ExternalChangePolicy::Restore => ExternalChangePolicy::Restore,
+        ExternalChangePolicy::Review => ExternalChangePolicy::Review,
         ExternalChangePolicy::Abort => ExternalChangePolicy::Abort,
         ExternalChangePolicy::Prompt => {
             if options.non_interactive || !io::stdin().is_terminal() {
@@ -461,16 +567,41 @@ fn resolve_external_changes(
     match action {
         ExternalChangePolicy::Accept => Ok(()),
         ExternalChangePolicy::Restore => restore_external_changes(root, entries),
+        ExternalChangePolicy::Review => review_external_changes(root, entries),
         ExternalChangePolicy::Abort | ExternalChangePolicy::Prompt => {
             Err(eyre!("aborted due to external vault changes"))
         }
     }
 }
 
+fn fail_if_unmerged(entries: &[GitStatusEntry]) -> Result<()> {
+    let unmerged = entries
+        .iter()
+        .filter(|entry| entry.is_unmerged())
+        .collect::<Vec<_>>();
+    if unmerged.is_empty() {
+        return Ok(());
+    }
+
+    let paths = unmerged
+        .iter()
+        .map(|entry| format!("{}\t{}", entry.code, entry.display_path()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(eyre!(
+        "unmerged Git conflict detected; resolve with Git/editor tooling, then rerun `rem commit --review`:\n{paths}"
+    ))
+}
+
 fn prompt_external_changes(entries: &[GitStatusEntry]) -> Result<ExternalChangePolicy> {
     println!("external vault changes detected:");
     for entry in entries {
-        println!("{}\t{}", entry.code, entry.path);
+        println!(
+            "{}\t{}\t{}",
+            entry.kind().label(),
+            entry.code,
+            entry.display_path()
+        );
     }
     print!("choose commit / restore / abort [commit]: ");
     io::stdout().flush()?;
@@ -485,28 +616,158 @@ fn prompt_external_changes(entries: &[GitStatusEntry]) -> Result<ExternalChangeP
     }
 }
 
+fn review_external_changes(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
+    loop {
+        print_review_summary(entries);
+        print!("choose commit-all / pick / diff / restore-all / abort [commit-all]: ");
+        io::stdout().flush()?;
+
+        let answer = read_choice()?;
+        match answer.as_str() {
+            "" | "commit-all" | "commit" | "c" => return Ok(()),
+            "restore-all" | "restore" | "r" => return restore_external_changes(root, entries),
+            "pick" | "p" => return review_each_file(root, entries),
+            "diff" | "d" => {
+                for entry in entries {
+                    print_entry_diff(root, entry)?;
+                }
+            }
+            "abort" | "a" => return Err(eyre!("aborted due to external vault changes")),
+            other => println!("unknown choice {other:?}"),
+        }
+    }
+}
+
+fn print_review_summary(entries: &[GitStatusEntry]) {
+    println!("external Git changes detected:");
+    for kind in [
+        GitStatusKind::Modified,
+        GitStatusKind::Added,
+        GitStatusKind::Deleted,
+        GitStatusKind::Renamed,
+        GitStatusKind::Copied,
+        GitStatusKind::Untracked,
+    ] {
+        let matching = entries
+            .iter()
+            .filter(|entry| entry.kind() == kind)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+
+        println!("{}:", kind.label());
+        for entry in matching {
+            println!("  {}\t{}", entry.code, entry.display_path());
+        }
+    }
+}
+
+fn review_each_file(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
+    for entry in entries {
+        loop {
+            println!(
+                "{}\t{}\t{}",
+                entry.kind().label(),
+                entry.code,
+                entry.display_path()
+            );
+            print!("choose include / restore / diff / abort [include]: ");
+            io::stdout().flush()?;
+
+            let answer = read_choice()?;
+            match answer.as_str() {
+                "" | "include" | "i" => break,
+                "restore" | "r" => {
+                    restore_external_entry(root, entry)?;
+                    break;
+                }
+                "diff" | "d" => print_entry_diff(root, entry)?,
+                "abort" | "a" => return Err(eyre!("aborted due to external vault changes")),
+                other => println!("unknown choice {other:?}"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_entry_diff(root: &Path, entry: &GitStatusEntry) -> Result<()> {
+    println!("diff -- {}", entry.path);
+    if entry.is_untracked() {
+        let path = root.join(&entry.path);
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|_| format!("<binary or unreadable file: {}>", path.display()));
+        println!("--- /dev/null");
+        println!("+++ {}", entry.path);
+        for line in raw.lines() {
+            println!("+{line}");
+        }
+        return Ok(());
+    }
+
+    let cached = git_output(root, &["diff", "--cached", "--", &entry.path])?;
+    if !cached.status.success() {
+        return Err(git_error("git diff --cached", &cached));
+    }
+    if !cached.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&cached.stdout));
+    }
+
+    let worktree = git_output(root, &["diff", "--", &entry.path])?;
+    if !worktree.status.success() {
+        return Err(git_error("git diff", &worktree));
+    }
+    if !worktree.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&worktree.stdout));
+    }
+    Ok(())
+}
+
+fn read_choice() -> Result<String> {
+    let mut answer = String::new();
+    let bytes = io::stdin().read_line(&mut answer)?;
+    if bytes == 0 {
+        return Err(eyre!(
+            "interactive review input ended before a choice was made"
+        ));
+    }
+    Ok(answer.trim().to_ascii_lowercase())
+}
+
 fn restore_external_changes(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
     for entry in entries {
-        let path = root.join(&entry.path);
-        if entry.is_untracked() {
-            remove_path_if_exists(&path)?;
-        } else {
-            git_checked(
-                root,
-                &["restore", "--staged", "--worktree", "--", &entry.path],
-                "git restore",
-            )?;
-        }
+        restore_external_entry(root, entry)?;
+    }
+    Ok(())
+}
+
+fn restore_external_entry(root: &Path, entry: &GitStatusEntry) -> Result<()> {
+    let path = root.join(&entry.path);
+    if entry.is_untracked() {
+        remove_path_if_exists(&path)?;
+    } else {
+        let mut args = vec!["restore", "--staged", "--worktree", "--"];
+        args.extend(entry.path_args());
+        git_checked(root, &args, "git restore")?;
     }
     Ok(())
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-            .wrap_err_with(|| format!("failed to remove {}", path.display()))?;
-    } else if path.exists() {
-        fs::remove_file(path).wrap_err_with(|| format!("failed to remove {}", path.display()))?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)
+                .wrap_err_with(|| format!("failed to remove {}", path.display()))?;
+        }
+        Ok(_) => {
+            fs::remove_file(path)
+                .wrap_err_with(|| format!("failed to remove {}", path.display()))?;
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("failed to inspect {}", path.display()));
+        }
     }
     Ok(())
 }
@@ -553,6 +814,21 @@ fn snapshot_index(workspace: &Workspace, tx_dir: &Path) -> Result<Option<PathBuf
             target.display()
         )
     })?;
+    Ok(Some(target))
+}
+
+fn snapshot_staging(root: &Path, tx_dir: &Path) -> Result<Option<PathBuf>> {
+    let output = git_output(root, &["diff", "--cached", "--binary", "--full-index"])?;
+    if !output.status.success() {
+        return Err(git_error("git diff --cached", &output));
+    }
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+
+    let target = tx_dir.join("staged.patch");
+    fs::write(&target, output.stdout)
+        .wrap_err_with(|| format!("failed to write {}", target.display()))?;
     Ok(Some(target))
 }
 
@@ -691,18 +967,53 @@ fn parse_status_z(raw: &[u8]) -> Vec<GitStatusEntry> {
             continue;
         }
         let code = text[0..2].to_string();
-        let mut path = text[3..].to_string();
+        let path = text[3..].to_string();
+        let mut original_path = None;
         if matches!(code.as_bytes().first(), Some(b'R' | b'C')) {
             if let Some(next) = parts.next() {
-                path = String::from_utf8_lossy(next).to_string();
+                original_path = Some(String::from_utf8_lossy(next).to_string());
             }
         }
         if !path.is_empty() {
-            entries.push(GitStatusEntry { code, path });
+            entries.push(GitStatusEntry {
+                code,
+                path,
+                original_path,
+            });
         }
     }
 
     entries
+}
+
+fn git_remote_host(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return None;
+    }
+
+    let host = if let Some((_, rest)) = remote.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority.rsplit('@').next().unwrap_or_default()
+    } else if let Some((left, _)) = remote.split_once(':') {
+        if left.contains('/') {
+            return None;
+        }
+        left.rsplit('@').next().unwrap_or_default()
+    } else {
+        return None;
+    };
+
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 fn is_excluded_relative_str(path: &str) -> bool {
@@ -775,8 +1086,17 @@ mod tests {
             "https://github.com/acme/rem.git"
         ));
         assert!(is_github_or_gitlab_remote("git@gitlab.com:acme/rem.git"));
+        assert!(is_github_or_gitlab_remote(
+            "ssh://git@github.com:22/acme/rem.git"
+        ));
         assert!(!is_github_or_gitlab_remote(
             "https://example.com/acme/rem.git"
+        ));
+        assert!(!is_github_or_gitlab_remote(
+            "https://github.com.evil/acme/rem.git"
+        ));
+        assert!(!is_github_or_gitlab_remote(
+            "git@evilgithub.com:acme/rem.git"
         ));
     }
 
@@ -796,7 +1116,62 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].code, " M");
         assert_eq!(parsed[0].path, "memories/short/a.md");
+        assert_eq!(parsed[0].original_path, None);
         assert_eq!(parsed[1].code, "??");
         assert_eq!(parsed[1].path, "notes.md");
+        assert_eq!(parsed[1].original_path, None);
+    }
+
+    #[test]
+    fn parses_rename_porcelain_z_status() {
+        let parsed = parse_status_z(b"R  new.md\0old.md\0");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].code, "R ");
+        assert_eq!(parsed[0].path, "new.md");
+        assert_eq!(parsed[0].original_path, Some("old.md".to_string()));
+        assert_eq!(parsed[0].display_path(), "old.md -> new.md");
+    }
+
+    #[test]
+    fn parses_copy_porcelain_z_status() {
+        let parsed = parse_status_z(b"C  copy.md\0source.md\0");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].code, "C ");
+        assert_eq!(parsed[0].path, "copy.md");
+        assert_eq!(parsed[0].original_path, Some("source.md".to_string()));
+        assert_eq!(parsed[0].display_path(), "source.md -> copy.md");
+    }
+
+    #[test]
+    fn classifies_git_status_entries() {
+        assert_eq!(
+            GitStatusEntry {
+                code: " M".to_string(),
+                path: "a.md".to_string(),
+                original_path: None,
+            }
+            .kind(),
+            GitStatusKind::Modified
+        );
+        assert_eq!(
+            GitStatusEntry {
+                code: "??".to_string(),
+                path: "a.md".to_string(),
+                original_path: None,
+            }
+            .kind(),
+            GitStatusKind::Untracked
+        );
+        assert_eq!(
+            GitStatusEntry {
+                code: "UU".to_string(),
+                path: "a.md".to_string(),
+                original_path: None,
+            }
+            .kind(),
+            GitStatusKind::Unmerged
+        );
     }
 }

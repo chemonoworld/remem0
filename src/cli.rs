@@ -63,6 +63,8 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
+    #[command(flatten)]
+    pub tx: MutationArgs,
     #[arg(long)]
     pub root: Option<PathBuf>,
     #[arg(long, value_enum)]
@@ -232,6 +234,11 @@ pub struct CommitArgs {
     pub accept_external: bool,
     #[arg(long, conflicts_with = "accept_external")]
     pub restore_external: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["accept_external", "restore_external", "non_interactive"]
+    )]
+    pub review: bool,
     #[arg(long)]
     pub dry_run: bool,
     #[arg(long)]

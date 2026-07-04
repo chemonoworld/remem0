@@ -47,6 +47,9 @@ cargo run -- init --root ~/Documents/MyVault --storage obsidian
 
 `rem` automatically keeps `.rem/cache/` and `.rem/tx/` out of Git. SQLite stays
 local and rebuildable; Markdown plus Git commits are the durable state.
+If the vault already has uncommitted files during init, pass
+`--accept-external` to include them in the initialization commit or
+`--restore-external` to discard them first.
 
 ## Commands
 
@@ -68,6 +71,17 @@ cargo run -- doctor
 index, atomically replaces the local cache, and creates one Git commit. In
 non-interactive scripts, use `--accept-external` to include existing manual
 changes or `--restore-external` to discard them.
+
+Use `cargo run -- commit --review` to inspect dirty Git working-tree changes
+before committing. The review flow can show diffs, include all changes, restore
+all changes, or walk each file and choose include/restore. If Git reports
+unmerged conflict states, resolve them with Git/editor tooling first and then
+rerun `rem commit --review`.
+
+Semantic memory conflict review is intentionally separate and still TODO:
+duplicate memory IDs, sync-conflict copies, and contradictory long-term memories
+should get a dedicated memory-aware review workflow rather than being solved by
+the Git dirty-state review.
 
 `rem search` uses the configured `default-search` mode when no explicit search
 flag is provided. Explicit BM25 search requires a current index; run

@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -70,6 +71,39 @@ impl TempProject {
             args
         );
         String::from_utf8_lossy(&output.stderr).to_string()
+    }
+
+    fn rem_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rem"))
+            .env("REM_HOME", &self.rem_home)
+            .current_dir(&self.root)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn rem_ok_with_stdin(&self, args: &[&str], stdin: &str) -> String {
+        let output = self.rem_with_stdin(args, stdin);
+        if !output.status.success() {
+            panic!(
+                "command failed: {:?}\nstdout:\n{}\nstderr:\n{}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8(output.stdout).unwrap()
     }
 
     fn git_in(args: &[&str], cwd: &Path) -> Output {
@@ -144,6 +178,43 @@ impl TempProject {
 
     fn status_short(&self) -> String {
         self.git_ok(&["status", "--short"])
+    }
+
+    fn git_commit_all(&self, message: &str) {
+        self.git_ok(&["add", "--all"]);
+        self.git_ok(&[
+            "-c",
+            "user.name=rem-test",
+            "-c",
+            "user.email=rem-test@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ]);
+    }
+
+    fn create_unmerged_conflict(&self) {
+        let conflict = self.vault.join("conflict.md");
+        fs::write(&conflict, "base\n").unwrap();
+        self.git_commit_all("base conflict fixture");
+
+        let base_branch = self.git_ok(&["branch", "--show-current"]);
+        let base_branch = base_branch.trim();
+        self.git_ok(&["switch", "-c", "other"]);
+        fs::write(&conflict, "other\n").unwrap();
+        self.git_commit_all("other conflict fixture");
+
+        self.git_ok(&["switch", base_branch]);
+        fs::write(&conflict, "main\n").unwrap();
+        self.git_commit_all("main conflict fixture");
+
+        let merge = Self::git_in(&["merge", "other"], &self.vault);
+        assert!(
+            !merge.status.success(),
+            "merge unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&merge.stdout),
+            String::from_utf8_lossy(&merge.stderr)
+        );
     }
 }
 
@@ -238,6 +309,41 @@ fn init_add_list_show_update_delete_flow() {
             .next()
             .is_some()
     );
+    assert_git_clean(&project);
+}
+
+#[test]
+fn init_can_accept_preexisting_external_files() {
+    let project = TempProject::new("init-accept-external");
+    project.init_git_vault();
+    fs::write(project.vault.join("README.md"), "# Existing vault\n").unwrap();
+
+    project.rem_ok(&[
+        "init",
+        "--root",
+        path_str(&project.vault),
+        "--accept-external",
+    ]);
+
+    assert!(project.tracked_files().contains("README.md"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn init_can_restore_preexisting_external_files() {
+    let project = TempProject::new("init-restore-external");
+    project.init_git_vault();
+    fs::write(project.vault.join("scratch.md"), "# Scratch\n").unwrap();
+
+    project.rem_ok(&[
+        "init",
+        "--root",
+        path_str(&project.vault),
+        "--restore-external",
+    ]);
+
+    assert!(!project.vault.join("scratch.md").exists());
+    assert!(!project.tracked_files().contains("scratch.md"));
     assert_git_clean(&project);
 }
 
@@ -584,6 +690,244 @@ fn rem_commit_accepts_or_restores_external_changes_non_interactive() {
 }
 
 #[test]
+fn rem_commit_review_can_include_all_external_changes() {
+    let project = TempProject::new("commit-review-include");
+    project.init_rem("local");
+
+    fs::write(project.vault.join("notes.md"), "# External\ninclude me").unwrap();
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "c\n");
+
+    assert!(output.contains("external Git changes detected"));
+    assert!(output.contains("committed "));
+    assert!(project.tracked_files().contains("notes.md"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_can_restore_all_external_changes() {
+    let project = TempProject::new("commit-review-restore");
+    project.init_rem("local");
+    let head = project.head();
+
+    fs::write(project.vault.join("scratch.md"), "# Scratch\nremove me").unwrap();
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "r\n");
+
+    assert!(output.contains("external Git changes detected"));
+    assert!(output.contains("nothing to commit"));
+    assert_eq!(project.head(), head);
+    assert!(!project.vault.join("scratch.md").exists());
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_external_untracked_symlink_removes_link_not_target() {
+    let project = TempProject::new("restore-symlink");
+    project.init_rem("local");
+    let target_dir = project.root.join("outside-target");
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::write(target_dir.join("keep.txt"), "do not delete\n").unwrap();
+    std::os::unix::fs::symlink(&target_dir, project.vault.join("linked-dir")).unwrap();
+
+    let output = project.rem_ok(&["commit", "--non-interactive", "--restore-external"]);
+
+    assert!(output.contains("nothing to commit"));
+    assert!(fs::symlink_metadata(project.vault.join("linked-dir")).is_err());
+    assert_eq!(
+        fs::read_to_string(target_dir.join("keep.txt")).unwrap(),
+        "do not delete\n"
+    );
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_pick_can_include_or_restore_each_file() {
+    let project = TempProject::new("commit-review-pick");
+    project.init_rem("local");
+
+    fs::write(project.vault.join("a-include.md"), "# Include\nkeep me").unwrap();
+    fs::write(project.vault.join("b-restore.md"), "# Restore\ndrop me").unwrap();
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "p\ni\nr\n");
+
+    assert!(output.contains("a-include.md"));
+    assert!(output.contains("b-restore.md"));
+    assert!(project.tracked_files().contains("a-include.md"));
+    assert!(!project.vault.join("b-restore.md").exists());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_restore_all_resets_tracked_modified_deleted_and_staged_added() {
+    let project = TempProject::new("commit-review-restore-tracked");
+    project.init_rem("local");
+    let head = project.head();
+
+    let tracked = project.vault.join("tracked.md");
+    fs::write(&tracked, "original\n").unwrap();
+    project.git_commit_all("add tracked fixture");
+    let deleted = project.vault.join("delete-me.md");
+    fs::write(&deleted, "delete me\n").unwrap();
+    project.git_commit_all("add delete fixture");
+    let head_after_fixture = project.head();
+
+    fs::write(&tracked, "modified\n").unwrap();
+    fs::remove_file(&deleted).unwrap();
+    let staged_added = project.vault.join("staged-added.md");
+    fs::write(&staged_added, "staged\n").unwrap();
+    project.git_ok(&["add", "staged-added.md"]);
+
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "r\n");
+
+    assert!(output.contains("external Git changes detected"));
+    assert!(output.contains("nothing to commit"));
+    assert_ne!(head, head_after_fixture);
+    assert_eq!(project.head(), head_after_fixture);
+    assert_eq!(fs::read_to_string(&tracked).unwrap(), "original\n");
+    assert!(!staged_added.exists());
+    assert_eq!(fs::read_to_string(&deleted).unwrap(), "delete me\n");
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_restore_all_resets_staged_rename() {
+    let project = TempProject::new("commit-review-restore-rename");
+    project.init_rem("local");
+
+    let old_path = project.vault.join("old-name.md");
+    let new_path = project.vault.join("new-name.md");
+    fs::write(&old_path, "# Old\nrename fixture").unwrap();
+    project.git_commit_all("add rename fixture");
+    let head = project.head();
+    project.git_ok(&["mv", "old-name.md", "new-name.md"]);
+
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "r\n");
+
+    assert!(output.contains("renamed:"));
+    assert!(output.contains("old-name.md -> new-name.md"));
+    assert!(output.contains("nothing to commit"));
+    assert_eq!(project.head(), head);
+    assert!(old_path.exists());
+    assert!(!new_path.exists());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_abort_leaves_external_changes_untouched() {
+    let project = TempProject::new("commit-review-abort");
+    project.init_rem("local");
+    let head = project.head();
+
+    let scratch = project.vault.join("scratch.md");
+    fs::write(&scratch, "# Scratch\nkeep pending").unwrap();
+    let output = project.rem_with_stdin(&["commit", "--review"], "a\n");
+
+    assert!(
+        !output.status.success(),
+        "review abort unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("external Git changes detected"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("aborted due to external vault changes")
+    );
+    assert_eq!(project.head(), head);
+    assert!(scratch.exists());
+    assert!(project.status_short().contains("scratch.md"));
+}
+
+#[test]
+fn rem_commit_review_diff_then_include_shows_untracked_preview() {
+    let project = TempProject::new("commit-review-diff");
+    project.init_rem("local");
+
+    fs::write(project.vault.join("preview.md"), "# Preview\nshow me").unwrap();
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "d\nc\n");
+
+    assert!(output.contains("diff -- preview.md"));
+    assert!(output.contains("+++ preview.md"));
+    assert!(output.contains("+# Preview"));
+    assert!(output.contains("committed "));
+    assert!(project.tracked_files().contains("preview.md"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_diff_shows_staged_and_unstaged_hunks() {
+    let project = TempProject::new("commit-review-diff-mixed");
+    project.init_rem("local");
+
+    let tracked = project.vault.join("tracked.md");
+    fs::write(&tracked, "base\n").unwrap();
+    project.git_commit_all("add mixed diff fixture");
+    fs::write(&tracked, "staged change\n").unwrap();
+    project.git_ok(&["add", "tracked.md"]);
+    fs::write(&tracked, "unstaged change\n").unwrap();
+
+    let output = project.rem_ok_with_stdin(&["commit", "--review"], "d\nr\n");
+
+    assert!(output.contains("diff -- tracked.md"));
+    assert!(output.contains("+staged change"));
+    assert!(output.contains("+unstaged change"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_review_requires_choice_input() {
+    let project = TempProject::new("commit-review-eof");
+    project.init_rem("local");
+
+    fs::write(project.vault.join("pending.md"), "# Pending\nneeds choice").unwrap();
+    let output = project.rem_with_stdin(&["commit", "--review"], "");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("interactive review input ended before a choice was made")
+    );
+    assert!(project.vault.join("pending.md").exists());
+}
+
+#[test]
+fn unmerged_git_conflicts_block_rem_commit_even_with_accept_external() {
+    let project = TempProject::new("unmerged-block");
+    project.init_rem("local");
+    project.create_unmerged_conflict();
+
+    let error = project.rem_err(&["commit", "--non-interactive", "--accept-external"]);
+    assert!(error.contains("unmerged Git conflict detected"));
+    assert!(error.contains("conflict.md"));
+}
+
+#[test]
+fn unmerged_git_conflicts_block_dry_run_before_reindex() {
+    let project = TempProject::new("unmerged-dry-run");
+    project.init_rem("local");
+    project.create_unmerged_conflict();
+
+    let error = project.rem_err(&["commit", "--dry-run"]);
+    assert!(error.contains("unmerged Git conflict detected"));
+    assert!(error.contains("conflict.md"));
+}
+
+#[test]
+fn unmerged_git_conflicts_block_mutations_before_writing_memory() {
+    let project = TempProject::new("unmerged-mutation");
+    project.init_rem("local");
+    project.create_unmerged_conflict();
+
+    let error = project.rem_err(&[
+        "add",
+        "--short",
+        "--accept-external",
+        "# Should Not Write\nblocked by merge conflict",
+    ]);
+    assert!(error.contains("unmerged Git conflict detected"));
+    assert!(error.contains("conflict.md"));
+    assert!(!memory_files_contain(&project.vault, "Should Not Write"));
+}
+
+#[test]
 fn mutation_external_changes_require_explicit_policy_non_interactive() {
     let project = TempProject::new("mutation-external");
     project.init_rem("local");
@@ -661,6 +1005,48 @@ fn git_commit_failure_rolls_back_markdown_and_index() {
     );
     assert_eq!(memory_file_count(&project.vault), 0);
     assert_git_clean(&project);
+}
+
+#[test]
+fn git_commit_failure_restores_preexisting_staged_changes() {
+    let project = TempProject::new("git-rollback-staging");
+    project.init_rem("local");
+
+    let tracked = project.vault.join("external.md");
+    fs::write(&tracked, "original\n").unwrap();
+    project.git_commit_all("add external fixture");
+    let head = project.head();
+
+    fs::write(&tracked, "staged external\n").unwrap();
+    project.git_ok(&["add", "external.md"]);
+    fs::write(&tracked, "unstaged external\n").unwrap();
+
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+    }
+
+    let error = project.rem_err(&[
+        "add",
+        "--short",
+        "--accept-external",
+        "# Fails Commit\nrollback memory only",
+    ]);
+    assert!(error.contains("git commit failed"));
+    assert_eq!(project.head(), head);
+    assert_eq!(memory_file_count(&project.vault), 0);
+
+    let staged_names = project.git_ok(&["diff", "--cached", "--name-only"]);
+    assert_eq!(staged_names.trim(), "external.md");
+    let staged_diff = project.git_ok(&["diff", "--cached", "--", "external.md"]);
+    assert!(staged_diff.contains("+staged external"));
+    let worktree_diff = project.git_ok(&["diff", "--", "external.md"]);
+    assert!(worktree_diff.contains("+unstaged external"));
+    assert!(project.status_short().contains("MM external.md"));
 }
 
 #[test]

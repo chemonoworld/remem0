@@ -273,7 +273,7 @@ fn run_init(store: ConfigStore, args: cli::InitArgs) -> Result<()> {
     transaction::run_mutation(
         &workspace,
         "rem: initialize vault",
-        TransactionOptions::default(),
+        transaction_options(args.tx)?,
         || workspace.init(),
     )?;
 
@@ -316,6 +316,7 @@ fn run_commit(store: &ConfigStore, args: cli::CommitArgs) -> Result<()> {
         transaction_options_from_parts(
             args.accept_external,
             args.restore_external,
+            args.review,
             args.non_interactive,
         )?,
         || Ok(()),
@@ -396,6 +397,7 @@ fn transaction_options(args: cli::MutationArgs) -> Result<TransactionOptions> {
     transaction_options_from_parts(
         args.accept_external,
         args.restore_external,
+        false,
         args.non_interactive,
     )
 }
@@ -403,13 +405,26 @@ fn transaction_options(args: cli::MutationArgs) -> Result<TransactionOptions> {
 fn transaction_options_from_parts(
     accept_external: bool,
     restore_external: bool,
+    review: bool,
     non_interactive: bool,
 ) -> Result<TransactionOptions> {
-    let external_policy = match (accept_external, restore_external) {
-        (true, false) => ExternalChangePolicy::Accept,
-        (false, true) => ExternalChangePolicy::Restore,
-        (false, false) => ExternalChangePolicy::Prompt,
-        (true, true) => return Err(eyre!("choose only one external-change policy")),
+    let selected = [accept_external, restore_external, review]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+    if selected > 1 {
+        return Err(eyre!("choose only one external-change policy"));
+    }
+    if review && non_interactive {
+        return Err(eyre!("--review requires interactive input"));
+    }
+
+    let external_policy = match (accept_external, restore_external, review) {
+        (true, false, false) => ExternalChangePolicy::Accept,
+        (false, true, false) => ExternalChangePolicy::Restore,
+        (false, false, true) => ExternalChangePolicy::Review,
+        (false, false, false) => ExternalChangePolicy::Prompt,
+        _ => return Err(eyre!("choose only one external-change policy")),
     };
 
     Ok(TransactionOptions {
