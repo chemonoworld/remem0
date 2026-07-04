@@ -1,1 +1,6 @@
 /target
+
+# FYH harness markdown/documentation artifacts
+.docs/
+.fyh-basecamp/
+.markdown/

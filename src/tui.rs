@@ -15,12 +15,16 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::config::{AppConfig, ConfigStore};
+use crate::{
+    config::{AppConfig, ConfigStore, ProfileConfig, StorageMode, normalize_root},
+    search::SearchMode,
+};
 
-const FIELDS: [Field; 4] = [
-    Field::ProfileName,
-    Field::DataDir,
-    Field::EnableSync,
+const FIELDS: [Field; 5] = [
+    Field::ActiveProfile,
+    Field::ProfileRoot,
+    Field::StorageMode,
+    Field::DefaultSearch,
     Field::Editor,
 ];
 
@@ -91,14 +95,14 @@ struct ConfigApp {
 }
 
 impl ConfigApp {
-    fn new(config: AppConfig, config_path: PathBuf) -> Self {
+    fn new(mut config: AppConfig, config_path: PathBuf) -> Self {
+        ensure_active_profile(&mut config);
         Self {
             config,
             config_path,
             editing: None,
             input: String::new(),
-            message: "Use arrow keys, Enter to edit, Space to toggle, S to save, Q to quit."
-                .to_string(),
+            message: "Use arrows, Enter edit, S save, I init vault, Q quit.".to_string(),
             selected: 0,
             should_quit: false,
         }
@@ -110,7 +114,7 @@ impl ConfigApp {
 
     fn handle_key(&mut self, key: KeyEvent, store: &ConfigStore) -> Result<()> {
         if self.editing.is_some() {
-            self.handle_edit_key(key);
+            self.handle_edit_key(key)?;
             return Ok(());
         }
 
@@ -122,12 +126,25 @@ impl ConfigApp {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Enter => self.begin_edit(),
-            KeyCode::Char(' ') => self.toggle_selected(),
             KeyCode::Char('r') => {
                 self.config = AppConfig::default();
+                ensure_active_profile(&mut self.config);
                 self.message = "Reset to defaults. Press S to write changes.".to_string();
             }
+            KeyCode::Char('i') => {
+                let profile = active_profile_mut(&mut self.config).clone();
+                let workspace = crate::workspace::Workspace::new(&profile);
+                crate::transaction::run_mutation(
+                    &workspace,
+                    "rem: initialize vault",
+                    crate::transaction::TransactionOptions::default(),
+                    || workspace.init(),
+                )?;
+                self.message = format!("Initialized {}", profile.root.display());
+            }
             KeyCode::Char('s') => {
+                let profile = active_profile(&self.config);
+                crate::transaction::validate_git_vault(&profile.root)?;
                 store.save(&self.config)?;
                 self.message = format!("Saved {}", self.config_path.display());
             }
@@ -137,9 +154,9 @@ impl ConfigApp {
         Ok(())
     }
 
-    fn handle_edit_key(&mut self, key: KeyEvent) {
+    fn handle_edit_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Enter => self.commit_edit(),
+            KeyCode::Enter => self.commit_edit()?,
             KeyCode::Esc => {
                 self.editing = None;
                 self.input.clear();
@@ -151,6 +168,8 @@ impl ConfigApp {
             KeyCode::Char(value) => self.input.push(value),
             _ => {}
         }
+
+        Ok(())
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -160,83 +179,109 @@ impl ConfigApp {
 
     fn begin_edit(&mut self) {
         let field = self.selected_field();
-
-        if field == Field::EnableSync {
-            self.toggle_selected();
-            return;
-        }
-
         self.input = field.value(&self.config);
         self.editing = Some(field);
         self.message = format!("Editing {}. Enter saves, Esc cancels.", field.label());
     }
 
-    fn toggle_selected(&mut self) {
-        if self.selected_field() == Field::EnableSync {
-            self.config.enable_sync = !self.config.enable_sync;
-            self.message = "Toggled enable-sync. Press S to write changes.".to_string();
-        }
-    }
-
-    fn commit_edit(&mut self) {
+    fn commit_edit(&mut self) -> Result<()> {
         if let Some(field) = self.editing {
-            field.set_value(&mut self.config, self.input.trim().to_string());
-            self.message = format!("Updated {}. Press S to write changes.", field.label());
+            match field.set_value(&mut self.config, self.input.trim().to_string()) {
+                Ok(()) => {
+                    self.message = format!("Updated {}. Press S to write changes.", field.label());
+                }
+                Err(err) => {
+                    self.message = format!("Invalid {}: {err}", field.label());
+                    return Ok(());
+                }
+            }
         }
 
         self.editing = None;
         self.input.clear();
+        Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Field {
-    ProfileName,
-    DataDir,
-    EnableSync,
+    ActiveProfile,
+    ProfileRoot,
+    StorageMode,
+    DefaultSearch,
     Editor,
 }
 
 impl Field {
     fn label(self) -> &'static str {
         match self {
-            Self::ProfileName => "profile-name",
-            Self::DataDir => "data-dir",
-            Self::EnableSync => "enable-sync",
+            Self::ActiveProfile => "active-profile",
+            Self::ProfileRoot => "profile-root",
+            Self::StorageMode => "storage-mode",
+            Self::DefaultSearch => "default-search",
             Self::Editor => "editor",
         }
     }
 
     fn help(self) -> &'static str {
         match self {
-            Self::ProfileName => "Active profile label",
-            Self::DataDir => "Directory used for app data",
-            Self::EnableSync => "Whether sync features should be enabled",
+            Self::ActiveProfile => "Profile name",
+            Self::ProfileRoot => "Canonical Markdown root path",
+            Self::StorageMode => "local, obsidian, or git; vault must also be GitHub/GitLab-backed",
+            Self::DefaultSearch => "auto, grep, bm25, vector, all",
             Self::Editor => "External editor command",
         }
     }
 
     fn value(self, config: &AppConfig) -> String {
+        let profile = active_profile(config);
         match self {
-            Self::ProfileName => config.profile_name.clone(),
-            Self::DataDir => config.data_dir.display().to_string(),
-            Self::EnableSync => config.enable_sync.to_string(),
+            Self::ActiveProfile => config.active_profile.clone(),
+            Self::ProfileRoot => profile.root.display().to_string(),
+            Self::StorageMode => profile.storage.to_string(),
+            Self::DefaultSearch => config.default_search.clone(),
             Self::Editor => config.editor.clone().unwrap_or_default(),
         }
     }
 
-    fn set_value(self, config: &mut AppConfig, value: String) {
+    fn set_value(self, config: &mut AppConfig, value: String) -> Result<()> {
+        ensure_active_profile(config);
         match self {
-            Self::ProfileName => config.profile_name = value,
-            Self::DataDir => config.data_dir = PathBuf::from(value),
-            Self::EnableSync => {
-                config.enable_sync = matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "t" | "yes" | "y" | "on"
-                )
+            Self::ActiveProfile => {
+                let old = config.active_profile.clone();
+                config.active_profile = if value.is_empty() {
+                    "default".to_string()
+                } else {
+                    value
+                };
+                if config.profile(&config.active_profile).is_err() {
+                    let root = active_profile(config).root.clone();
+                    config.upsert_profile(ProfileConfig {
+                        name: config.active_profile.clone(),
+                        root,
+                        storage: StorageMode::Local,
+                    });
+                }
+                if config.profile(&old).is_err() {
+                    ensure_active_profile(config);
+                }
+            }
+            Self::ProfileRoot => {
+                active_profile_mut(config).root = normalize_root(PathBuf::from(value))
+            }
+            Self::StorageMode => {
+                active_profile_mut(config).storage = match value.as_str() {
+                    "obsidian" => StorageMode::Obsidian,
+                    "git" => StorageMode::Git,
+                    _ => StorageMode::Local,
+                }
+            }
+            Self::DefaultSearch => {
+                config.default_search = SearchMode::parse_config_value(&value)?.to_string()
             }
             Self::Editor => config.editor = (!value.is_empty()).then_some(value),
         }
+        Ok(())
     }
 }
 
@@ -264,7 +309,7 @@ fn render_header(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
     let title = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                "remem0",
+                "rem",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -285,7 +330,7 @@ fn render_fields(frame: &mut Frame<'_>, app: &mut ConfigApp, area: Rect) {
             let value = field.value(&app.config);
             let line = Line::from(vec![
                 Span::styled(
-                    format!("{:<14}", field.label()),
+                    format!("{:<16}", field.label()),
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::raw(value),
@@ -317,7 +362,7 @@ fn render_fields(frame: &mut Frame<'_>, app: &mut ConfigApp, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
     let footer = Paragraph::new(vec![
         Line::from(app.message.clone()),
-        Line::from("Enter edit  Space toggle  S save  R reset  Q quit"),
+        Line::from("Enter edit  I init vault  S save  R reset  Q quit"),
     ])
     .wrap(Wrap { trim: true })
     .block(Block::default().borders(Borders::TOP));
@@ -346,4 +391,41 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         width,
         height,
     }
+}
+
+fn ensure_active_profile(config: &mut AppConfig) {
+    if config.profile(&config.active_profile).is_ok() {
+        return;
+    }
+
+    let root = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("rem");
+    config.upsert_profile(ProfileConfig {
+        name: config.active_profile.clone(),
+        root,
+        storage: StorageMode::Local,
+    });
+}
+
+fn active_profile(config: &AppConfig) -> &ProfileConfig {
+    config
+        .profile(&config.active_profile)
+        .or_else(|_| {
+            config
+                .profiles
+                .first()
+                .ok_or_else(|| color_eyre::eyre::eyre!("no profile"))
+        })
+        .expect("ensure_active_profile should create a profile")
+}
+
+fn active_profile_mut(config: &mut AppConfig) -> &mut ProfileConfig {
+    ensure_active_profile(config);
+    let index = config
+        .profiles
+        .iter()
+        .position(|profile| profile.name == config.active_profile)
+        .unwrap_or(0);
+    &mut config.profiles[index]
 }
