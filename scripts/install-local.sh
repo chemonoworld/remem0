@@ -7,4 +7,4 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec cargo install --path "$repo_root" --locked --force
+exec cargo install --path "$repo_root" --locked --offline --force

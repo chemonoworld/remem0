@@ -15,8 +15,12 @@ The script runs the equivalent command below and installs `rem` to
 `$HOME/.cargo/bin/rem`:
 
 ```sh
-cargo install --path . --locked --force
+cargo install --path . --locked --offline --force
 ```
+
+`--offline` keeps local deployment from waiting on crates.io. Run `cargo build`
+once with network access first if the required dependencies are not already in
+your local Cargo cache.
 
 Verify the installation from a different directory:
 
