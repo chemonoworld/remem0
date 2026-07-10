@@ -279,6 +279,14 @@ pub fn write_memory(workspace: &Workspace, memory: &Memory) -> Result<Memory> {
     };
     fs::create_dir_all(&dir).wrap_err_with(|| format!("failed to create {}", dir.display()))?;
     let path = dir.join(format!("{}.md", memory.metadata.id));
+    match fs::symlink_metadata(&path) {
+        Ok(_) => ensure_mutable_memory_path(&path)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .wrap_err_with(|| format!("failed to inspect memory {}", path.display()));
+        }
+    }
     fs::write(&path, memory.to_markdown())
         .wrap_err_with(|| format!("failed to write {}", path.display()))?;
 
@@ -431,6 +439,9 @@ pub fn update_memory(
 pub fn delete_memory(workspace: &Workspace, id: &str, hard: bool) -> Result<Memory> {
     let mut memory = find_memory(workspace, id, true)?;
     let original_path = memory.path.clone();
+    if let Some(path) = &original_path {
+        ensure_mutable_memory_path(path)?;
+    }
     if hard {
         if let Some(path) = &memory.path {
             fs::remove_file(path)?;
@@ -448,6 +459,18 @@ pub fn delete_memory(workspace: &Workspace, id: &str, hard: bool) -> Result<Memo
         fs::remove_file(path)?;
     }
     Ok(written)
+}
+
+pub fn ensure_mutable_memory_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .wrap_err_with(|| format!("failed to inspect memory {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(eyre!(
+            "refusing to mutate symlinked memory {}; replace it with a regular vault file first",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn promote_memory(

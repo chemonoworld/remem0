@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 struct TempProject {
     root: PathBuf,
@@ -1074,6 +1074,534 @@ fn stale_transaction_journal_reported_by_doctor_and_commit() {
 
     let error = project.rem_err(&["commit", "--non-interactive", "--accept-external"]);
     assert!(error.contains("transaction recovery pending"));
+}
+
+#[test]
+fn semantic_fact_directives_support_current_historical_and_source_queries() {
+    let project = TempProject::new("semantic-facts");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--long",
+        "--kind",
+        "preference",
+        "# Brand Preference\nUser changed running shoe preference after Adidas broke.\n@fact User | PREFERS | Adidas | valid_from=2025-01-10 | valid_to=2025-04-02 | confidence=0.8\n@fact User | PREFERS | Puma | valid_from=2025-04-02 | confidence=0.9",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+
+    let current = project.rem_ok(&["facts", "--entity", "User"]);
+    assert!(current.contains("PREFERS"));
+    assert!(current.contains("Puma"));
+    assert!(!current.contains("Adidas"));
+    assert!(current.contains(&id));
+
+    let historical = project.rem_ok(&["facts", "--entity", "User", "--at", "2025-02-01"]);
+    assert!(historical.contains("Adidas"));
+    assert!(!historical.contains("Puma"));
+
+    let all = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(all.contains("Adidas"));
+    assert!(all.contains("Puma"));
+
+    let source = project.rem_ok(&["facts", "--entity", "Puma", "--source"]);
+    assert!(source.contains("episode-"));
+    assert!(source.contains("memories/long/"));
+    assert!(source.contains("User changed running shoe preference"));
+
+    let rebuild = project.rem_ok(&["rebuild"]);
+    assert!(rebuild.contains("semantic_entities=3"));
+    assert!(rebuild.contains("semantic_episodes=1"));
+    assert!(rebuild.contains("semantic_facts=2"));
+
+    let doctor = project.rem_ok(&["doctor"]);
+    assert!(doctor.contains("semantic cache ready entities=3 episodes=1 facts=2"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn unsupported_semantic_relation_rolls_back_transaction() {
+    let project = TempProject::new("semantic-relation-rollback");
+    project.init_rem("local");
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let error = project.rem_err(&[
+        "add",
+        "--long",
+        "# Invalid Relation\n@fact User | LOVES | Puma | valid_from=2025-04-02",
+    ]);
+
+    assert!(error.contains("reindex produced 1 diagnostics"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+    assert!(!memory_files_contain(&project.vault, "Invalid Relation"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_rebuild_reports_unique_entities_across_memories() {
+    let project = TempProject::new("semantic-unique-entities");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--short",
+        "# Tool One\n@fact User | USES | SQLite | valid_from=2026-01-01",
+    ]);
+    project.rem_ok(&[
+        "add",
+        "--short",
+        "# Tool Two\n@fact User | USES | Rust | valid_from=2026-01-02",
+    ]);
+
+    let rebuild = project.rem_ok(&["rebuild"]);
+    assert!(rebuild.contains("semantic_entities=3"));
+    assert!(rebuild.contains("semantic_episodes=2"));
+    assert!(rebuild.contains("semantic_facts=2"));
+
+    let uses = project.rem_ok(&["facts", "--relation", "USES"]);
+    assert!(uses.contains("SQLite"));
+    assert!(uses.contains("Rust"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_current_query_respects_future_and_bounded_validity() {
+    let project = TempProject::new("semantic-current-validity");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "--kind",
+        "preference",
+        "# Temporal Current\n@fact User | PREFERS | CurrentBounded | valid_from=2020-01-01 | valid_to=9999-01-01\n@fact User | PREFERS | FutureBrand | valid_from=9999-01-01\n@fact User | DISLIKES | ExpiredBrand | valid_from=2020-01-01 | valid_to=2021-01-01",
+    ]);
+
+    let current = project.rem_ok(&["facts", "--entity", "User"]);
+    assert!(current.contains("CurrentBounded"));
+    assert!(!current.contains("FutureBrand"));
+    assert!(!current.contains("ExpiredBrand"));
+
+    let all = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(all.contains("CurrentBounded"));
+    assert!(all.contains("FutureBrand"));
+    assert!(all.contains("ExpiredBrand"));
+
+    let historical = project.rem_ok(&["facts", "--entity", "User", "--at", "2020-06-01"]);
+    assert!(historical.contains("CurrentBounded"));
+    assert!(historical.contains("ExpiredBrand"));
+    assert!(!historical.contains("FutureBrand"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_unix_time_queries_compare_numerically() {
+    let project = TempProject::new("semantic-unix-time");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Unix Time\n@fact User | USES | AncientUnixTool | valid_from=999 | valid_to=9999999999\n@fact User | USES | FutureUnixTool | valid_from=9999999999",
+    ]);
+
+    let current = project.rem_ok(&["facts", "--entity", "User"]);
+    assert!(current.contains("AncientUnixTool"));
+    assert!(!current.contains("FutureUnixTool"));
+
+    let historical = project.rem_ok(&["facts", "--entity", "User", "--at", "1000"]);
+    assert!(historical.contains("AncientUnixTool"));
+    assert!(!historical.contains("FutureUnixTool"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_historical_queries_normalize_iso_and_unix_time_formats() {
+    let project = TempProject::new("semantic-mixed-time-query");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Mixed Time\n@fact User | USES | UnixTool | valid_from=1735689600 | valid_to=1735776000\n@fact User | USES | IsoTool | valid_from=2025-01-01T00:00:00Z | valid_to=2025-01-02T00:00:00Z",
+    ]);
+
+    let iso_query = project.rem_ok(&["facts", "--entity", "User", "--at", "2025-01-01T12:00:00Z"]);
+    assert!(iso_query.contains("UnixTool"));
+    assert!(iso_query.contains("IsoTool"));
+
+    let unix_query = project.rem_ok(&["facts", "--entity", "User", "--at", "1735732800"]);
+    assert!(unix_query.contains("UnixTool"));
+    assert!(unix_query.contains("IsoTool"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_temporal_queries_honor_precise_and_pre_epoch_boundaries() {
+    let project = TempProject::new("semantic-temporal-boundaries");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Boundaries\n@fact User | USES | PreEpochTool | valid_from=-1 | valid_to=0\n@fact User | USES | DateTool | valid_from=2025-01-01 | valid_to=2025-01-02",
+    ]);
+
+    let pre_epoch = project.rem_ok(&["facts", "--entity", "User", "--at", "-1"]);
+    assert!(pre_epoch.contains("PreEpochTool"));
+    let epoch = project.rem_ok(&["facts", "--entity", "User", "--at", "0"]);
+    assert!(!epoch.contains("PreEpochTool"));
+
+    let before_end = project.rem_ok(&["facts", "--entity", "User", "--at", "2025-01-01T23:59:59Z"]);
+    assert!(before_end.contains("DateTool"));
+    let at_end = project.rem_ok(&["facts", "--entity", "User", "--at", "2025-01-02T00:00:00Z"]);
+    assert!(!at_end.contains("DateTool"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_rejects_out_of_range_unix_times_and_rolls_back() {
+    let project = TempProject::new("semantic-unix-overflow");
+    project.init_rem("local");
+    let head = project.head();
+
+    let error = project.rem_err(&[
+        "add",
+        "--long",
+        "# Invalid Unix\n@fact User | USES | OverflowTool | valid_from=9223372036854775808",
+    ]);
+
+    assert!(error.contains("signed 64-bit unix seconds"));
+    assert_eq!(project.head(), head);
+    assert!(!memory_files_contain(&project.vault, "OverflowTool"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_facts_reject_ambiguous_at_and_all_combination() {
+    let project = TempProject::new("semantic-at-all");
+    project.init_rem("local");
+
+    let error = project.rem_err(&["facts", "--at", "2025-01-01", "--all"]);
+    assert!(error.contains("cannot be used with"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_facts_explain_when_the_local_cache_is_missing() {
+    let project = TempProject::new("semantic-missing-cache");
+    project.init_rem("local");
+    fs::remove_file(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let error = project.rem_err(&["facts"]);
+    assert!(error.contains("semantic index does not exist"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn invalid_semantic_time_values_roll_back_transaction() {
+    let project = TempProject::new("semantic-time-rollback");
+    project.init_rem("local");
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let error = project.rem_err(&[
+        "add",
+        "--long",
+        "# Bad Time\n@fact User | PREFERS | Puma | valid_from=2025-04-02 | valid_to=2025-01-10",
+    ]);
+
+    assert!(error.contains("reindex produced 1 diagnostics"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+    assert!(!memory_files_contain(&project.vault, "Bad Time"));
+
+    let error = project.rem_err(&[
+        "add",
+        "--long",
+        "# Bad Time Format\n@fact User | PREFERS | Puma | valid_from=2025-4-2",
+    ]);
+    assert!(error.contains("reindex produced 1 diagnostics"));
+    assert!(!memory_files_contain(&project.vault, "Bad Time Format"));
+
+    let error = project.rem_err(&[
+        "add",
+        "--long",
+        "# Zero Interval\n@fact User | PREFERS | Puma | valid_from=2025-04-02 | valid_to=2025-04-02T00:00:00Z",
+    ]);
+    assert!(error.contains("valid_to must be later"));
+    assert!(!memory_files_contain(&project.vault, "Zero Interval"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_extraction_ignores_fact_like_text_inside_code_fences() {
+    let project = TempProject::new("semantic-code-fence");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--short",
+        "# Fact Example\n```text\n@fact User | LOVES | This should stay inert\n```\n    @fact User | LOVES | Indented code should stay inert\n@fact User | USES | SQLite | valid_from=2020-01-01",
+    ]);
+
+    let facts = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(facts.contains("USES"));
+    assert!(facts.contains("SQLite"));
+    assert!(!facts.contains("LOVES"));
+    assert!(!facts.contains("This should stay inert"));
+    assert!(!facts.contains("Indented code should stay inert"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_facts_support_value_objects_relation_normalization_and_at_validation() {
+    let project = TempProject::new("semantic-value-object");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Value Object\n@fact User | works-at | OpenAI | valid_from=2020-01-01\n@fact User | MENTIONS | 1440 | object_kind=Value | valid_from=2020-01-01",
+    ]);
+
+    let relation = project.rem_ok(&["facts", "--relation", "works-at"]);
+    assert!(relation.contains("WORKS_AT"));
+    assert!(relation.contains("OpenAI"));
+
+    let value_object = project.rem_ok(&["facts", "--entity", "1440"]);
+    assert!(value_object.contains("MENTIONS"));
+    assert!(value_object.contains("1440"));
+
+    let error = project.rem_err(&["facts", "--at", "2020-1-1"]);
+    assert!(error.contains("zero-padded YYYY-MM-DD"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_fact_output_exposes_expiration_timestamp() {
+    let project = TempProject::new("semantic-expiration-output");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Expiration\n@fact User | USES | RetiredTool | valid_from=2020-01-01 | expired_at=2021-02-03",
+    ]);
+
+    let facts = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(facts.contains("RetiredTool"));
+    assert!(facts.contains("2021-02-03"));
+    let sourced = project.rem_ok(&["facts", "--entity", "User", "--all", "--source"]);
+    assert!(sourced.contains("2021-02-03"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_cache_tracks_update_and_archive_lifecycle() {
+    let project = TempProject::new("semantic-crud-lifecycle");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--long",
+        "# Lifecycle\n@fact User | USES | OldTool | valid_from=2020-01-01",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let before_update = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(before_update.contains("OldTool"));
+
+    project.rem_ok(&[
+        "update",
+        &id,
+        "# Lifecycle Updated\n@fact User | USES | NewTool | valid_from=2020-01-01",
+    ]);
+    let after_update = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(after_update.contains("NewTool"));
+    assert!(!after_update.contains("OldTool"));
+
+    project.rem_ok(&["delete", &id]);
+    let after_archive = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(after_archive.trim().is_empty());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_rebuild_keeps_fact_identity_and_provenance_deterministic() {
+    let project = TempProject::new("semantic-deterministic-rebuild");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--short",
+        "# Deterministic\nsource text\n@fact User | USES | SQLite | valid_from=2020-01-01",
+    ]);
+    let before = project.rem_ok(&["facts", "--entity", "User", "--all", "--source"]);
+    project.rem_ok(&["rebuild"]);
+    let after = project.rem_ok(&["facts", "--entity", "User", "--all", "--source"]);
+    assert_eq!(after, before);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn rem_commit_rebuilds_semantic_cache_from_external_markdown_edits() {
+    let project = TempProject::new("semantic-external-commit");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--short",
+        "# External Edit\n@fact User | USES | OldTool | valid_from=2020-01-01",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let path = project.vault.join(format!("memories/short/{id}.md"));
+    let edited = fs::read_to_string(&path)
+        .unwrap()
+        .replace("OldTool", "ExternalTool");
+    fs::write(&path, edited).unwrap();
+
+    project.rem_ok(&["commit", "--non-interactive", "--accept-external"]);
+    let facts = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(facts.contains("ExternalTool"));
+    assert!(!facts.contains("OldTool"));
+    assert_eq!(project.last_commit_subject(), "rem: commit vault changes");
+    assert_git_clean(&project);
+}
+
+#[test]
+fn invalid_external_semantic_edit_preserves_markdown_and_restores_cache() {
+    let project = TempProject::new("semantic-external-rollback");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--short",
+        "# External Rollback\n@fact User | USES | StableTool | valid_from=2020-01-01",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let path = project.vault.join(format!("memories/short/{id}.md"));
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace("USES | StableTool", "LOVES | BrokenTool");
+    fs::write(&path, invalid).unwrap();
+
+    let error = project.rem_err(&["commit", "--non-interactive", "--accept-external"]);
+    assert!(error.contains("unsupported semantic relation"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+    assert!(
+        fs::read_to_string(&path)
+            .unwrap()
+            .contains("LOVES | BrokenTool")
+    );
+    assert!(project.status_short().contains("memories/short/"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_preserves_unrelated_symlink_entries() {
+    let project = TempProject::new("rollback-symlink");
+    project.init_rem("local");
+
+    let target = project.root.join("linked-asset.md");
+    fs::write(&target, "external asset\n").unwrap();
+    let link = project.vault.join("attachments/linked-asset.md");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(&target, &link).unwrap();
+    project.git_commit_all("add linked asset");
+
+    let invalid = project.vault.join("memories/long/invalid-semantic.md");
+    fs::write(
+        &invalid,
+        "---\nid: invalid-semantic\ntype: long\nscope: user\nkind: note\nstatus: active\ncreated_at: 1\nupdated_at: 1\ntags: []\ntitle: null\nsource: fixture\nagent: null\nsession: null\nconfidence: 1.0\npromoted_from: null\nsupersedes: []\n---\n# Invalid Semantic\n@fact User | LOVES | Broken\n",
+    )
+    .unwrap();
+    project.git_commit_all("add invalid semantic fixture");
+
+    let error = project.rem_err(&["add", "--short", "# Fails\nrollback"]);
+    assert!(error.contains("reindex produced 1 diagnostics"));
+    let metadata = fs::symlink_metadata(&link).unwrap();
+    assert!(metadata.file_type().is_symlink());
+    assert_eq!(fs::read_link(&link).unwrap(), target);
+    assert_eq!(fs::read_to_string(&link).unwrap(), "external asset\n");
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn mutations_refuse_symlinked_memory_files() {
+    let project = TempProject::new("symlinked-memory-mutation");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&["add", "--short", "# Linked Memory\nvalid memory"]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let memory_path = project.vault.join(format!("memories/short/{id}.md"));
+    let target = project.root.join("linked-memory.md");
+    let original = fs::read_to_string(&memory_path).unwrap();
+    fs::rename(&memory_path, &target).unwrap();
+    symlink(&target, &memory_path).unwrap();
+    project.git_commit_all("store memory through symlink");
+    let head = project.head();
+
+    let update = project.rem_err(&["update", &id, "# Updated\nshould not write"]);
+    assert!(update.contains("refusing to mutate symlinked memory"));
+    let delete = project.rem_err(&["delete", "--hard", &id]);
+    assert!(delete.contains("refusing to mutate symlinked memory"));
+    let edit = project.rem_err(&["edit", &id]);
+    assert!(edit.contains("refusing to mutate symlinked memory"));
+    let commit = project.rem_err(&["commit", "--non-interactive"]);
+    assert!(commit.contains("memory file must be a regular vault file"));
+    assert_eq!(project.head(), head);
+    assert!(
+        fs::symlink_metadata(&memory_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn mutations_refuse_symlinked_gitignore() {
+    let project = TempProject::new("symlinked-gitignore");
+    project.init_rem("local");
+
+    let gitignore = project.vault.join(".gitignore");
+    let target = project.root.join("linked-gitignore");
+    let original = fs::read_to_string(&gitignore).unwrap();
+    fs::rename(&gitignore, &target).unwrap();
+    symlink(&target, &gitignore).unwrap();
+    project.git_commit_all("store gitignore through symlink");
+    let head = project.head();
+
+    let error = project.rem_err(&["add", "--short", "# Blocked\nno external writes"]);
+    assert!(error.contains("refusing to update symlinked .gitignore"));
+    let dry_run = project.rem_err(&["commit", "--dry-run"]);
+    assert!(dry_run.contains("refusing to update symlinked .gitignore"));
+    assert_eq!(project.head(), head);
+    assert!(
+        fs::symlink_metadata(&gitignore)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    assert_git_clean(&project);
 }
 
 fn assert_git_clean(project: &TempProject) {

@@ -50,6 +50,8 @@ pub enum Command {
     Commit(CommitArgs),
     #[command(about = "Search memories.")]
     Search(SearchArgs),
+    #[command(about = "List derived temporal semantic facts.")]
+    Facts(FactsArgs),
     #[command(about = "Rebuild the vault-local SQLite search index.")]
     Rebuild,
     #[command(about = "Inspect configuration, vault, policy, and index state.")]
@@ -259,6 +261,20 @@ pub struct SearchArgs {
     pub mode: Option<SearchMode>,
     #[arg(value_name = "QUERY")]
     pub query: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FactsArgs {
+    #[arg(long)]
+    pub entity: Option<String>,
+    #[arg(long)]
+    pub relation: Option<String>,
+    #[arg(long, conflicts_with = "all", allow_hyphen_values = true)]
+    pub at: Option<String>,
+    #[arg(long, conflicts_with = "at")]
+    pub all: bool,
+    #[arg(long)]
+    pub source: bool,
 }
 
 impl SearchArgs {

@@ -9,7 +9,7 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{Connection, params};
 
-use crate::{memory, workspace::Workspace};
+use crate::{memory, semantic, workspace::Workspace};
 
 pub fn rebuild(workspace: &Workspace) -> Result<RebuildReport> {
     fs::create_dir_all(workspace.cache_dir())
@@ -48,6 +48,24 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
     let mut diagnostics = 0usize;
     let mut winners = BTreeMap::<String, memory::Memory>::new();
     for path in memory::memory_paths(workspace, true)? {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                insert_diagnostic(
+                    &conn,
+                    path.display().to_string(),
+                    "error",
+                    "memory file must be a regular vault file, not a symlink".to_string(),
+                )?;
+                diagnostics += 1;
+                continue;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                insert_diagnostic(&conn, path.display().to_string(), "error", err.to_string())?;
+                diagnostics += 1;
+                continue;
+            }
+        }
         match memory::read_memory(&path) {
             Ok(memory) => {
                 let id = memory.metadata.id.clone();
@@ -86,11 +104,28 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
     let indexed = winners.len();
     for memory in winners.into_values() {
         insert_memory(&conn, &memory)?;
+        match insert_semantic(&conn, &memory) {
+            Ok(()) => {}
+            Err(err) => {
+                diagnostics += 1;
+                insert_diagnostic(
+                    &conn,
+                    memory_path_label(&memory),
+                    "error",
+                    format!("semantic cache extraction failed: {err}"),
+                )?;
+            }
+        }
     }
+    semantic::validate_no_duplicate_fact_ids(&conn)?;
+    let (semantic_entities, semantic_episodes, semantic_facts) = semantic::fact_counts(&conn)?;
 
     Ok(RebuildReport {
         indexed,
         diagnostics,
+        semantic_entities,
+        semantic_episodes,
+        semantic_facts,
         index_path: index_path.display().to_string(),
     })
 }
@@ -113,6 +148,27 @@ pub fn diagnostics_count(workspace: &Workspace) -> Result<usize> {
     let conn = Connection::open(workspace.index_path())?;
     let count = conn.query_row("SELECT COUNT(*) FROM diagnostics", [], |row| row.get(0))?;
     Ok(count)
+}
+
+pub fn diagnostic_messages(index_path: &Path) -> Result<Vec<String>> {
+    let conn = Connection::open(index_path)
+        .wrap_err_with(|| format!("failed to open {}", index_path.display()))?;
+    let mut stmt = conn.prepare(
+        "SELECT path, severity, message FROM diagnostics ORDER BY path ASC, severity ASC, message ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(format!(
+            "{} [{}]: {}",
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut messages = Vec::new();
+    for row in rows {
+        messages.push(row?);
+    }
+    Ok(messages)
 }
 
 fn create_schema(conn: &Connection) -> Result<()> {
@@ -154,6 +210,7 @@ CREATE TABLE diagnostics (
 );
 "#,
     )?;
+    semantic::create_schema(conn)?;
     Ok(())
 }
 
@@ -200,6 +257,13 @@ fn insert_memory(conn: &Connection, memory: &memory::Memory) -> Result<()> {
     Ok(())
 }
 
+fn insert_semantic(conn: &Connection, memory: &memory::Memory) -> Result<()> {
+    let path = memory_path_label(memory);
+    let extraction = semantic::extract(memory)?;
+    semantic::insert_extraction(conn, &extraction, &path)?;
+    Ok(())
+}
+
 fn insert_diagnostic(
     conn: &Connection,
     path: String,
@@ -225,5 +289,8 @@ fn memory_path_label(memory: &memory::Memory) -> String {
 pub struct RebuildReport {
     pub indexed: usize,
     pub diagnostics: usize,
+    pub semantic_entities: usize,
+    pub semantic_episodes: usize,
+    pub semantic_facts: usize,
     pub index_path: String,
 }

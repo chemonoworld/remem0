@@ -181,6 +181,7 @@ pub fn run_mutation_with_message<T>(
 pub fn dry_run(workspace: &Workspace) -> Result<DryRunReport> {
     validate_git_vault(workspace.root())?;
     fail_if_pending_transactions(workspace)?;
+    validate_gitignore_path(workspace)?;
 
     let changed_paths = git_status(workspace.root())?
         .into_iter()
@@ -263,6 +264,7 @@ pub fn pending_transactions(workspace: &Workspace) -> Result<Vec<PathBuf>> {
 
 pub fn ensure_gitignore(workspace: &Workspace) -> Result<bool> {
     let path = workspace.root().join(".gitignore");
+    validate_gitignore_path(workspace)?;
     let mut raw = fs::read_to_string(&path).unwrap_or_default();
     let mut changed = false;
 
@@ -282,6 +284,24 @@ pub fn ensure_gitignore(workspace: &Workspace) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+fn validate_gitignore_path(workspace: &Workspace) -> Result<()> {
+    let path = workspace.root().join(".gitignore");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(eyre!(
+                "refusing to update symlinked .gitignore {}; replace it with a regular vault file first",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 pub fn git_status(root: &Path) -> Result<Vec<GitStatusEntry>> {
@@ -379,11 +399,14 @@ impl Transaction {
         self.temp_index = Some(temp_path.clone());
         let report = index::rebuild_to_path(&self.workspace, &temp_path)?;
         if report.diagnostics > 0 {
+            let diagnostics = index::diagnostic_messages(&temp_path)?;
             let _ = fs::remove_file(&temp_path);
             self.temp_index = None;
+            let details = diagnostics.join("\n");
             return Err(eyre!(
-                "reindex produced {} diagnostics; fix malformed or duplicate memory files before committing",
-                report.diagnostics
+                "reindex produced {} diagnostics; fix malformed or duplicate memory files before committing:\n{}",
+                report.diagnostics,
+                details
             ));
         }
 
@@ -772,6 +795,79 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn copy_snapshot_entry(source: &Path, target: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .wrap_err_with(|| format!("failed to inspect {}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        let link_target = fs::read_link(source)
+            .wrap_err_with(|| format!("failed to read symlink {}", source.display()))?;
+        create_symlink(source, &link_target, target)?;
+    } else {
+        fs::copy(source, target).wrap_err_with(|| {
+            format!(
+                "failed to copy snapshot entry {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn restore_snapshot_entry(source: &Path, target: &Path) -> Result<()> {
+    let source_metadata = fs::symlink_metadata(source)
+        .wrap_err_with(|| format!("failed to inspect snapshot {}", source.display()))?;
+    let source_is_symlink = source_metadata.file_type().is_symlink();
+    if source_is_symlink || path_is_symlink(target)? {
+        remove_path_if_exists(target)?;
+    }
+    copy_snapshot_entry(source, target)
+}
+
+fn path_is_symlink(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).wrap_err_with(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(source: &Path, link_target: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(link_target, target).wrap_err_with(|| {
+        format!(
+            "failed to snapshot symlink {} to {}",
+            source.display(),
+            target.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn create_symlink(source: &Path, link_target: &Path, target: &Path) -> Result<()> {
+    let result = if source.is_dir() {
+        std::os::windows::fs::symlink_dir(link_target, target)
+    } else {
+        std::os::windows::fs::symlink_file(link_target, target)
+    };
+    result.wrap_err_with(|| {
+        format!(
+            "failed to snapshot symlink {} to {}",
+            source.display(),
+            target.display()
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(source: &Path, _link_target: &Path, target: &Path) -> Result<()> {
+    Err(eyre!(
+        "cannot snapshot symlink {} to {} on this platform",
+        source.display(),
+        target.display()
+    ))
+}
+
 fn snapshot_vault(root: &Path, snapshot_dir: &Path) -> Result<BTreeSet<String>> {
     let mut files = BTreeSet::new();
     for file in collect_files(root)? {
@@ -788,13 +884,7 @@ fn snapshot_vault(root: &Path, snapshot_dir: &Path) -> Result<BTreeSet<String>> 
             fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::copy(&file, &target).wrap_err_with(|| {
-            format!(
-                "failed to snapshot {} to {}",
-                file.display(),
-                target.display()
-            )
-        })?;
+        copy_snapshot_entry(&file, &target)?;
         files.insert(label);
     }
     Ok(files)
@@ -846,8 +936,7 @@ fn restore_snapshot(
         }
         let label = path_label(relative);
         if !snapshot_files.contains(&label) {
-            fs::remove_file(&file)
-                .wrap_err_with(|| format!("failed to remove {}", file.display()))?;
+            remove_path_if_exists(&file)?;
         }
     }
 
@@ -858,13 +947,7 @@ fn restore_snapshot(
             fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::copy(&source, &target).wrap_err_with(|| {
-            format!(
-                "failed to restore {} from {}",
-                target.display(),
-                source.display()
-            )
-        })?;
+        restore_snapshot_entry(&source, &target)?;
     }
 
     Ok(())
@@ -890,10 +973,12 @@ fn collect_files_into(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Resu
         if is_excluded_relative(relative) {
             continue;
         }
-        if path.is_dir() {
-            collect_files_into(root, &path, files)?;
-        } else if path.is_file() {
+        let metadata = fs::symlink_metadata(&path)
+            .wrap_err_with(|| format!("failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || metadata.is_file() {
             files.push(path);
+        } else if metadata.is_dir() {
+            collect_files_into(root, &path, files)?;
         }
     }
 
@@ -969,10 +1054,10 @@ fn parse_status_z(raw: &[u8]) -> Vec<GitStatusEntry> {
         let code = text[0..2].to_string();
         let path = text[3..].to_string();
         let mut original_path = None;
-        if matches!(code.as_bytes().first(), Some(b'R' | b'C')) {
-            if let Some(next) = parts.next() {
-                original_path = Some(String::from_utf8_lossy(next).to_string());
-            }
+        if matches!(code.as_bytes().first(), Some(b'R' | b'C'))
+            && let Some(next) = parts.next()
+        {
+            original_path = Some(String::from_utf8_lossy(next).to_string());
         }
         if !path.is_empty() {
             entries.push(GitStatusEntry {

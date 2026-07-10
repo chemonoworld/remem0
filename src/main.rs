@@ -6,6 +6,7 @@ mod index;
 mod memory;
 mod policy;
 mod search;
+mod semantic;
 mod transaction;
 mod tui;
 mod workspace;
@@ -115,6 +116,7 @@ fn run() -> Result<()> {
                     let path = memory
                         .path
                         .ok_or_else(|| eyre!("memory has no filesystem path"))?;
+                    memory::ensure_mutable_memory_path(&path)?;
                     let status = run_editor(&editor, &path)?;
                     if !status.success() {
                         return Err(eyre!("editor exited with status {status}"));
@@ -209,12 +211,67 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Command::Facts(args) => {
+            let workspace = active_workspace(&store)?;
+            let facts = search::facts(
+                &workspace,
+                semantic::FactQuery {
+                    entity: args.entity,
+                    relation: args.relation,
+                    at: args.at,
+                    include_expired: args.all,
+                },
+            )?;
+            for fact in facts {
+                if args.source {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        fact.id,
+                        fact.subject,
+                        fact.relation,
+                        fact.object,
+                        fact.valid_from.as_deref().unwrap_or(""),
+                        fact.valid_to.as_deref().unwrap_or(""),
+                        fact.expired_at.as_deref().unwrap_or(""),
+                        fact.source_memory_id,
+                        fact.confidence
+                            .map(|confidence| confidence.to_string())
+                            .unwrap_or_default(),
+                        fact.source_path,
+                        fact.episode_id,
+                        fact.excerpt
+                    );
+                } else {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        fact.id,
+                        fact.subject,
+                        fact.relation,
+                        fact.object,
+                        fact.valid_from.as_deref().unwrap_or(""),
+                        fact.valid_to.as_deref().unwrap_or(""),
+                        fact.expired_at.as_deref().unwrap_or(""),
+                        fact.learned_at,
+                        fact.confidence
+                            .map(|confidence| confidence.to_string())
+                            .unwrap_or_default(),
+                        fact.source_memory_id
+                    );
+                }
+            }
+            Ok(())
+        }
         Command::Rebuild => {
             let workspace = active_workspace(&store)?;
             let report = index::rebuild(&workspace)?;
             println!(
-                "rebuilt {} indexed={} diagnostics={}",
-                report.index_path, report.indexed, report.diagnostics
+                "rebuilt {} indexed={} diagnostics={} semantic_entities={} semantic_episodes={} semantic_facts={}",
+                report.index_path,
+                report.indexed,
+                report.diagnostics,
+                report.semantic_entities,
+                report.semantic_episodes,
+                report.semantic_facts
             );
             Ok(())
         }

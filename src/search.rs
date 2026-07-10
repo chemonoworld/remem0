@@ -5,7 +5,7 @@ use color_eyre::eyre::{Result, eyre};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{memory, workspace::Workspace};
+use crate::{memory, semantic, workspace::Workspace};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -66,6 +66,21 @@ pub fn search(workspace: &Workspace, query: &str, mode: SearchMode) -> Result<Ve
         SearchMode::All => merge(grep(workspace, query)?, bm25_if_indexed(workspace, query)?),
         SearchMode::Vector => Err(eyre!("vector search is not configured in v1")),
     }
+}
+
+pub fn facts(workspace: &Workspace, query: semantic::FactQuery) -> Result<Vec<semantic::FactRow>> {
+    if !workspace.index_path().exists() {
+        return Err(eyre!(
+            "semantic index does not exist; run `rem rebuild` before `rem facts`"
+        ));
+    }
+    let conn = Connection::open(workspace.index_path())?;
+    if !semantic::index_has_semantic_schema(&conn)? {
+        return Err(eyre!(
+            "semantic index schema is missing; run `rem rebuild` to refresh the cache"
+        ));
+    }
+    semantic::query_facts(&conn, &query)
 }
 
 fn grep(workspace: &Workspace, query: &str) -> Result<Vec<SearchResult>> {

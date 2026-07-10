@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use color_eyre::eyre::Result;
 
-use crate::{config::StorageMode, index, transaction, workspace::Workspace};
+use crate::{config::StorageMode, index, semantic, transaction, workspace::Workspace};
 
 #[derive(Clone, Debug)]
 pub struct DoctorFinding {
@@ -44,6 +44,17 @@ pub fn run(workspace: &Workspace, _storage: StorageMode) -> Result<Vec<DoctorFin
                 )));
             }
         }
+        match semantic_counts(workspace) {
+            Ok(Some((entities, episodes, facts))) => findings.push(ok(format!(
+                "semantic cache ready entities={entities} episodes={episodes} facts={facts}"
+            ))),
+            Ok(None) => findings.push(warn(
+                "semantic cache schema missing; run `rem rebuild`".to_string(),
+            )),
+            Err(err) => findings.push(warn(format!(
+                "semantic cache is unreadable; run `rem rebuild`: {err}"
+            ))),
+        }
     } else {
         findings.push(warn("index missing; run `rem rebuild`".to_string()));
     }
@@ -77,6 +88,14 @@ pub fn run(workspace: &Workspace, _storage: StorageMode) -> Result<Vec<DoctorFin
     }
 
     Ok(findings)
+}
+
+fn semantic_counts(workspace: &Workspace) -> Result<Option<(usize, usize, usize)>> {
+    let conn = rusqlite::Connection::open(workspace.index_path())?;
+    if !semantic::index_has_semantic_schema(&conn)? {
+        return Ok(None);
+    }
+    Ok(Some(semantic::fact_counts(&conn)?))
 }
 
 fn check_dir(findings: &mut Vec<DoctorFinding>, path: &Path, label: &str) {
