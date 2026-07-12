@@ -431,6 +431,21 @@ fn doctor_without_profile_reports_actionable_warning() {
 }
 
 #[test]
+fn tui_alias_is_not_a_supported_command() {
+    let project = TempProject::new("no-tui-alias");
+    let help = project.rem_ok(&["--help"]);
+    assert!(help.contains("configure"));
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.trim_start().starts_with("tui"))
+    );
+
+    let error = project.rem_err(&["tui"]);
+    assert!(error.contains("unrecognized subcommand"));
+}
+
+#[test]
 fn expected_user_errors_are_concise() {
     let project = TempProject::new("concise-errors");
     project.init_rem("local");

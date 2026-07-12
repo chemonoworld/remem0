@@ -23,8 +23,6 @@ pub struct Cli {
 pub enum Command {
     #[command(about = "Open the interactive configuration TUI.")]
     Configure,
-    #[command(about = "Alias for configure.")]
-    Tui,
     #[command(about = "Initialize the active or provided memory vault.")]
     Init(InitArgs),
     #[command(about = "Manage global profiles.")]

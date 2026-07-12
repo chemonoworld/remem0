@@ -34,7 +34,7 @@ fn run() -> Result<()> {
     let store = ConfigStore::new()?;
 
     match cli.command.unwrap_or(Command::Configure) {
-        Command::Configure | Command::Tui => tui::run(store),
+        Command::Configure => tui::run(store),
         Command::Init(args) => run_init(store, args),
         Command::Profile { command } => run_profile_command(store, command),
         Command::Add(args) => {
