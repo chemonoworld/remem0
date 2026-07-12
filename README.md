@@ -130,8 +130,18 @@ the same instant.
 `valid_from`, `valid_to`, `expired_at`, then `learned_at`; with `--source`, the
 remaining fields identify the source memory, path, episode, and excerpt.
 
-`cargo run -- configure` opens the TUI configuration flow. Non-interactive
-profile commands are available for scripts and tests:
+`cargo run -- configure` opens the TUI configuration flow. `storage-mode` and
+`default-search` use an option picker rather than free-form text. `profile-root`
+still accepts a typed path; select that field and press `Ctrl-F` to open a fuzzy
+directory finder that recursively searches readable, non-symlink directories
+under `$HOME` in the background.
+
+`S`/`s` writes the configuration independently of vault initialization, so a
+new root can be recorded before it is a valid Git-backed vault. `I` attempts
+vault initialization and reports any Git validation problem in the TUI without
+discarding unsaved configuration changes.
+
+Non-interactive profile commands are available for scripts and tests:
 
 ```sh
 cargo run -- profile add work ~/work-vault --storage git
@@ -146,3 +156,8 @@ cargo fmt --check
 cargo check
 cargo test
 ```
+
+On Unix hosts with `expect` installed, `cargo test` also runs a real PTY
+regression for the first-run Configure flow, including the root finder, option
+pickers, and uppercase `S` save shortcut. The test reports a skip when that
+system PTY helper is unavailable.

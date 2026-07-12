@@ -1,6 +1,8 @@
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use clap::ValueEnum;
@@ -98,6 +100,19 @@ pub enum StorageMode {
     Git,
 }
 
+impl StorageMode {
+    pub fn parse_config_value(value: &str) -> Result<Self> {
+        match value.trim() {
+            "local" => Ok(Self::Local),
+            "obsidian" => Ok(Self::Obsidian),
+            "git" => Ok(Self::Git),
+            other => Err(eyre!(
+                "invalid storage mode {other:?}; expected local, obsidian, or git"
+            )),
+        }
+    }
+}
+
 impl std::fmt::Display for StorageMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -149,8 +164,44 @@ impl ConfigStore {
             .wrap_err_with(|| format!("failed to create {}", self.root.display()))?;
 
         let raw = toml::to_string_pretty(config).wrap_err("failed to serialize config")?;
-        fs::write(&self.path, raw)
-            .wrap_err_with(|| format!("failed to write {}", self.path.display()))?;
+        let temporary_path = self.root.join(format!(
+            ".config.toml.{}.{}.tmp",
+            std::process::id(),
+            SAVE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let write_result = (|| -> Result<()> {
+            let mut temporary = fs::File::create(&temporary_path).wrap_err_with(|| {
+                format!(
+                    "failed to create temporary config {}",
+                    temporary_path.display()
+                )
+            })?;
+            temporary.write_all(raw.as_bytes()).wrap_err_with(|| {
+                format!(
+                    "failed to write temporary config {}",
+                    temporary_path.display()
+                )
+            })?;
+            temporary.sync_all().wrap_err_with(|| {
+                format!(
+                    "failed to sync temporary config {}",
+                    temporary_path.display()
+                )
+            })?;
+            drop(temporary);
+            fs::rename(&temporary_path, &self.path).wrap_err_with(|| {
+                format!(
+                    "failed to replace {} with saved configuration",
+                    self.path.display()
+                )
+            })?;
+            Ok(())
+        })();
+
+        if let Err(err) = write_result {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(err);
+        }
 
         Ok(())
     }
@@ -159,6 +210,18 @@ impl ConfigStore {
         let config = AppConfig::default();
         self.save(&config)?;
         Ok(config)
+    }
+}
+
+static SAVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+impl ConfigStore {
+    pub(crate) fn for_test(root: PathBuf) -> Self {
+        Self {
+            path: root.join("config.toml"),
+            root,
+        }
     }
 }
 
@@ -215,5 +278,35 @@ mod tests {
             normalize_root(PathBuf::from("~/rem-test")),
             PathBuf::from(home).join("rem-test")
         );
+    }
+
+    #[test]
+    fn storage_mode_rejects_unknown_values() {
+        assert_eq!(
+            StorageMode::parse_config_value("git").unwrap(),
+            StorageMode::Git
+        );
+        assert!(StorageMode::parse_config_value("not-a-mode").is_err());
+    }
+
+    #[test]
+    fn save_replaces_config_without_leaving_a_temporary_file() {
+        let root = env::temp_dir().join(format!("rem-config-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let store = ConfigStore::for_test(root.clone());
+        let mut config = AppConfig::default();
+
+        store.save(&config).unwrap();
+        config.default_search = "bm25".to_string();
+        store.save(&config).unwrap();
+
+        assert_eq!(store.load_or_default().unwrap().default_search, "bm25");
+        let entries = fs::read_dir(&root)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name(), "config.toml");
+        fs::remove_dir_all(root).unwrap();
     }
 }
