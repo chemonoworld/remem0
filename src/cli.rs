@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::{
     config::StorageMode,
     memory::{MemoryKind, MemoryScope, MemoryType},
+    output::ColorChoice,
     search::SearchMode,
 };
 
@@ -15,6 +16,8 @@ use crate::{
     about = "Local-first Markdown memory CLI for humans and agents."
 )]
 pub struct Cli {
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
     #[command(subcommand)]
     pub command: Option<Command>,
 }

@@ -11,6 +11,7 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use crate::{
     index,
+    output::{self, Tone},
     workspace::{self, Workspace},
 };
 
@@ -768,17 +769,19 @@ fn fail_if_unmerged(entries: &[GitStatusEntry]) -> Result<()> {
 }
 
 fn prompt_external_changes(entries: &[GitStatusEntry]) -> Result<ExternalChangePolicy> {
-    println!("external vault changes detected:");
+    output::line(output::paint(
+        "external vault changes detected:",
+        Tone::Warning,
+    ));
     for entry in entries {
-        println!(
-            "{}\t{}\t{}",
-            entry.kind().label(),
-            entry.code,
-            entry.display_path()
-        );
+        let kind = entry.kind().label();
+        output::line(output::row([
+            (kind.to_string(), output::change_tone(kind)),
+            (entry.code.clone(), Tone::Muted),
+            (entry.display_path(), Tone::Path),
+        ]));
     }
-    print!("choose commit / restore / abort [commit]: ");
-    io::stdout().flush()?;
+    output::prompt("choose commit / restore / abort [commit]: ")?;
 
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
@@ -793,8 +796,7 @@ fn prompt_external_changes(entries: &[GitStatusEntry]) -> Result<ExternalChangeP
 fn review_external_changes(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
     loop {
         print_review_summary(entries);
-        print!("choose commit-all / pick / diff / restore-all / abort [commit-all]: ");
-        io::stdout().flush()?;
+        output::prompt("choose commit-all / pick / diff / restore-all / abort [commit-all]: ")?;
 
         let answer = read_choice()?;
         match answer.as_str() {
@@ -807,13 +809,19 @@ fn review_external_changes(root: &Path, entries: &[GitStatusEntry]) -> Result<()
                 }
             }
             "abort" | "a" => return Err(eyre!("aborted due to external vault changes")),
-            other => println!("unknown choice {other:?}"),
+            other => output::line(output::paint(
+                format!("unknown choice {other:?}"),
+                Tone::Warning,
+            )),
         }
     }
 }
 
 fn print_review_summary(entries: &[GitStatusEntry]) {
-    println!("external Git changes detected:");
+    output::line(output::paint(
+        "external Git changes detected:",
+        Tone::Warning,
+    ));
     for kind in [
         GitStatusKind::Modified,
         GitStatusKind::Added,
@@ -830,9 +838,16 @@ fn print_review_summary(entries: &[GitStatusEntry]) {
             continue;
         }
 
-        println!("{}:", kind.label());
+        output::line(format!(
+            "{}:",
+            output::paint(kind.label(), output::change_tone(kind.label()))
+        ));
         for entry in matching {
-            println!("  {}\t{}", entry.code, entry.display_path());
+            output::line(format!(
+                "  {}\t{}",
+                output::paint(&entry.code, Tone::Muted),
+                output::paint(entry.display_path(), Tone::Path)
+            ));
         }
     }
 }
@@ -840,14 +855,13 @@ fn print_review_summary(entries: &[GitStatusEntry]) {
 fn review_each_file(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
     for entry in entries {
         loop {
-            println!(
-                "{}\t{}\t{}",
-                entry.kind().label(),
-                entry.code,
-                entry.display_path()
-            );
-            print!("choose include / restore / diff / abort [include]: ");
-            io::stdout().flush()?;
+            let kind = entry.kind().label();
+            output::line(output::row([
+                (kind.to_string(), output::change_tone(kind)),
+                (entry.code.clone(), Tone::Muted),
+                (entry.display_path(), Tone::Path),
+            ]));
+            output::prompt("choose include / restore / diff / abort [include]: ")?;
 
             let answer = read_choice()?;
             match answer.as_str() {
@@ -858,7 +872,10 @@ fn review_each_file(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
                 }
                 "diff" | "d" => print_entry_diff(root, entry)?,
                 "abort" | "a" => return Err(eyre!("aborted due to external vault changes")),
-                other => println!("unknown choice {other:?}"),
+                other => output::line(output::paint(
+                    format!("unknown choice {other:?}"),
+                    Tone::Warning,
+                )),
             }
         }
     }
@@ -867,16 +884,18 @@ fn review_each_file(root: &Path, entries: &[GitStatusEntry]) -> Result<()> {
 }
 
 fn print_entry_diff(root: &Path, entry: &GitStatusEntry) -> Result<()> {
-    println!("diff -- {}", entry.path);
+    output::diff(&format!("diff -- {}\n", entry.path));
     if entry.is_untracked() {
         let path = root.join(&entry.path);
         let raw = fs::read_to_string(&path)
             .unwrap_or_else(|_| format!("<binary or unreadable file: {}>", path.display()));
-        println!("--- /dev/null");
-        println!("+++ {}", entry.path);
+        let mut diff = format!("--- /dev/null\n+++ {}\n", entry.path);
         for line in raw.lines() {
-            println!("+{line}");
+            diff.push('+');
+            diff.push_str(line);
+            diff.push('\n');
         }
+        output::diff(&diff);
         return Ok(());
     }
 
@@ -885,7 +904,7 @@ fn print_entry_diff(root: &Path, entry: &GitStatusEntry) -> Result<()> {
         return Err(git_error("git diff --cached", &cached));
     }
     if !cached.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&cached.stdout));
+        output::diff(&String::from_utf8_lossy(&cached.stdout));
     }
 
     let worktree = git_output(root, &["diff", "--", &entry.path])?;
@@ -893,7 +912,7 @@ fn print_entry_diff(root: &Path, entry: &GitStatusEntry) -> Result<()> {
         return Err(git_error("git diff", &worktree));
     }
     if !worktree.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&worktree.stdout));
+        output::diff(&String::from_utf8_lossy(&worktree.stdout));
     }
     Ok(())
 }

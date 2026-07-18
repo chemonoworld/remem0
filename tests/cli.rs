@@ -48,6 +48,21 @@ impl TempProject {
             .unwrap()
     }
 
+    fn rem_with_env(&self, args: &[&str], set: &[(&str, &str)], remove: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rem"));
+        command
+            .env("REM_HOME", &self.rem_home)
+            .current_dir(&self.root)
+            .args(args);
+        for (key, value) in set {
+            command.env(key, value);
+        }
+        for key in remove {
+            command.env_remove(key);
+        }
+        command.output().unwrap()
+    }
+
     fn rem_ok(&self, args: &[&str]) -> String {
         self.rem_ok_in(args, &self.root)
     }
@@ -312,6 +327,76 @@ fn init_add_list_show_update_delete_flow() {
             .is_some()
     );
     assert_git_clean(&project);
+}
+
+#[test]
+fn color_policy_styles_human_output_without_breaking_pipes() {
+    let project = TempProject::new("color-output");
+    project.init_rem("git");
+    let added = project.rem_ok(&[
+        "add",
+        "--long",
+        "--scope",
+        "project",
+        "--kind",
+        "decision",
+        "# Color Contract\nKeep machine output stable.",
+    ]);
+    let id = added.split_whitespace().last().unwrap();
+
+    let piped = project.rem_with_env(
+        &["list"],
+        &[],
+        &["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR"],
+    );
+    assert!(piped.status.success());
+    let piped = String::from_utf8(piped.stdout).unwrap();
+    assert!(piped.contains(&format!("{id}\tlong\tproject\tdecision\tColor Contract")));
+    assert!(!piped.contains("\u{1b}["));
+
+    let always = project.rem_ok(&["--color", "always", "list"]);
+    assert!(always.contains(id));
+    assert!(always.contains("\u{1b}["));
+
+    let forced = project.rem_with_env(
+        &["list"],
+        &[("CLICOLOR_FORCE", "1")],
+        &["NO_COLOR", "CLICOLOR", "FORCE_COLOR"],
+    );
+    assert!(forced.status.success());
+    assert!(
+        String::from_utf8(forced.stdout)
+            .unwrap()
+            .contains("\u{1b}[")
+    );
+
+    let no_color = project.rem_with_env(
+        &["list"],
+        &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")],
+        &["CLICOLOR", "FORCE_COLOR"],
+    );
+    assert!(no_color.status.success());
+    assert!(
+        !String::from_utf8(no_color.stdout)
+            .unwrap()
+            .contains("\u{1b}[")
+    );
+
+    let never = project.rem_with_env(
+        &["--color", "never", "list"],
+        &[("CLICOLOR_FORCE", "1")],
+        &["NO_COLOR", "CLICOLOR", "FORCE_COLOR"],
+    );
+    assert!(never.status.success());
+    assert!(!String::from_utf8(never.stdout).unwrap().contains("\u{1b}["));
+
+    let shown = project.rem_ok(&["--color", "always", "show", id]);
+    assert!(shown.contains("\u{1b}["));
+    assert!(shown.contains("# Color Contract"));
+
+    let error = project.rem_err(&["--color", "always", "search", "--vector", "color"]);
+    assert!(error.contains("\u{1b}["));
+    assert!(error.contains("vector search is not configured"));
 }
 
 #[test]
@@ -859,12 +944,13 @@ fn rem_commit_review_diff_then_include_shows_untracked_preview() {
     project.init_rem("local");
 
     fs::write(project.vault.join("preview.md"), "# Preview\nshow me").unwrap();
-    let output = project.rem_ok_with_stdin(&["commit", "--review"], "d\nc\n");
+    let output = project.rem_ok_with_stdin(&["--color", "always", "commit", "--review"], "d\nc\n");
 
     assert!(output.contains("diff -- preview.md"));
     assert!(output.contains("+++ preview.md"));
     assert!(output.contains("+# Preview"));
-    assert!(output.contains("committed "));
+    assert!(output.contains("\u{1b}[32m+# Preview\u{1b}[0m"));
+    assert!(output.contains("committed"));
     assert!(project.tracked_files().contains("preview.md"));
     assert_git_clean(&project);
 }

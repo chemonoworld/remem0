@@ -83,6 +83,10 @@ expect eof
             .env("REM_HOME", &self.rem_home)
             .env("HOME", &self.home)
             .env("REM_TUI_BIN", env!("CARGO_BIN_EXE_rem"))
+            .env_remove("NO_COLOR")
+            .env_remove("CLICOLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env_remove("FORCE_COLOR")
             .current_dir(&self.work)
             .output()
             .unwrap()
@@ -179,4 +183,43 @@ expect eof
         .output()
         .unwrap();
     assert!(reloaded.status.success());
+}
+
+#[test]
+fn automatic_color_is_enabled_for_a_real_tty() {
+    if !expect_is_available() {
+        eprintln!("skipping PTY test because expect is not installed");
+        return;
+    }
+
+    let project = TempTuiProject::new("color-auto");
+    let colored = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) profile list
+expect eof
+"#,
+    );
+    assert!(colored.status.success());
+    let colored = String::from_utf8_lossy(&colored.stdout);
+    assert!(colored.contains("no profiles configured"));
+    assert!(
+        colored.contains("\u{1b}["),
+        "expected ANSI output: {colored:?}"
+    );
+
+    let plain = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) --color never profile list
+expect eof
+"#,
+    );
+    assert!(plain.status.success());
+    let plain = String::from_utf8_lossy(&plain.stdout);
+    assert!(plain.contains("no profiles configured"));
+    assert!(
+        !plain.contains("\u{1b}["),
+        "unexpected ANSI output: {plain:?}"
+    );
 }

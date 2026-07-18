@@ -30,6 +30,11 @@ command -v rem
 rem --help
 ```
 
+Terminal output uses color automatically. Redirected output remains plain;
+`rem --color always <command>` forces ANSI color and
+`rem --color never <command>` disables it. `NO_COLOR=1` is also honored in the
+default `auto` mode.
+
 If `command -v rem` returns nothing, add Cargo's user binary directory to your
 shell startup file and open a new terminal:
 

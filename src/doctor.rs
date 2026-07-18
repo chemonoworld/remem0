@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fmt, fs, path::Path};
 
 use color_eyre::eyre::Result;
 
@@ -6,8 +6,23 @@ use crate::{config::StorageMode, index, semantic, transaction, workspace::Worksp
 
 #[derive(Clone, Debug)]
 pub struct DoctorFinding {
-    pub level: &'static str,
+    pub level: DoctorLevel,
     pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DoctorLevel {
+    Ok,
+    Warn,
+}
+
+impl fmt::Display for DoctorLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+        })
+    }
 }
 
 pub fn run(workspace: &Workspace, _storage: StorageMode) -> Result<Vec<DoctorFinding>> {
@@ -139,14 +154,14 @@ fn check_gitignore(findings: &mut Vec<DoctorFinding>, root: &Path) {
 
 fn ok(message: String) -> DoctorFinding {
     DoctorFinding {
-        level: "ok",
+        level: DoctorLevel::Ok,
         message,
     }
 }
 
 fn warn(message: String) -> DoctorFinding {
     DoctorFinding {
-        level: "warn",
+        level: DoctorLevel::Warn,
         message,
     }
 }

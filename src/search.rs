@@ -5,7 +5,7 @@ use color_eyre::eyre::{Result, eyre};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{memory, semantic, workspace::Workspace};
+use crate::{memory, output, semantic, workspace::Workspace};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -90,7 +90,7 @@ fn grep(workspace: &Workspace, query: &str) -> Result<Vec<SearchResult>> {
         let memory = match memory::read_memory(&path) {
             Ok(memory) => memory,
             Err(err) => {
-                eprintln!("warn\t{}: {err}", path.display());
+                output::warning(format!("{}: {err}", path.display()));
                 continue;
             }
         };
@@ -142,10 +142,10 @@ fn bm25_if_indexed(workspace: &Workspace, query: &str) -> Result<Vec<SearchResul
         match bm25(workspace, query) {
             Ok(results) => Ok(results),
             Err(err) => {
-                eprintln!(
-                    "warn\t{}: {err}; run `rem rebuild`",
+                output::warning(format!(
+                    "{}: {err}; run `rem rebuild`",
                     workspace.index_path().display()
-                );
+                ));
                 Ok(Vec::new())
             }
         }

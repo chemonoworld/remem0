@@ -1,12 +1,10 @@
-use std::{
-    collections::BTreeMap,
-    io::{self, Write},
-};
+use std::{collections::BTreeMap, io};
 
 use color_eyre::eyre::{Result, eyre};
 
 use crate::{
     memory::{self, Memory, MemoryKind, MemoryMetadata, MemoryScope, MemoryStatus, MemoryType},
+    output::{self, Tone},
     semantic,
     workspace::Workspace,
 };
@@ -236,37 +234,54 @@ pub fn semantic_plan(workspace: &Workspace, body: &str, scope: MemoryScope) -> R
 
 pub fn print_plan(plan: &ReviewPlan) {
     if let Some(target) = &plan.target {
-        println!(
-            "candidate id={} type={} scope={} kind={} title={}",
-            target.metadata.id,
-            target.metadata.memory_type,
-            target.metadata.scope,
-            target.metadata.kind,
-            target.title()
-        );
+        let memory_type = target.metadata.memory_type.to_string();
+        output::line(format!(
+            "{} {} {} {} {} {}",
+            output::paint("candidate", Tone::Info),
+            output::key_value("id", &target.metadata.id, Tone::Id),
+            output::key_value("type", &memory_type, output::memory_type_tone(&memory_type)),
+            output::key_value("scope", target.metadata.scope, Tone::Scope),
+            output::key_value("kind", target.metadata.kind, Tone::Kind),
+            output::key_value("title", target.title(), Tone::Title)
+        ));
     } else {
-        println!("candidate none");
+        output::line(format!(
+            "{} {}",
+            output::paint("candidate", Tone::Info),
+            output::paint("none", Tone::Muted)
+        ));
     }
     for candidate in &plan.candidates {
         if let Some(semantic_match) = &candidate.semantic_match {
-            println!(
-                "candidate semantic id={} suggested={} reason={} subject={} relation={} existing={} proposed={}",
-                candidate.memory.metadata.id,
-                candidate.suggested_action.label(),
-                candidate.reason,
-                semantic_match.subject,
-                semantic_match.relation,
-                semantic_match.existing_object,
-                semantic_match.proposed_object
-            );
+            output::line(format!(
+                "{} {} {} {} {} {} {} {} {}",
+                output::paint("candidate", Tone::Info),
+                output::paint("semantic", Tone::Short),
+                output::key_value("id", &candidate.memory.metadata.id, Tone::Id),
+                output::key_value(
+                    "suggested",
+                    candidate.suggested_action.label(),
+                    output::action_tone(candidate.suggested_action.label())
+                ),
+                output::key_value("reason", candidate.reason, Tone::Muted),
+                output::key_value("subject", &semantic_match.subject, Tone::Title),
+                output::key_value("relation", &semantic_match.relation, Tone::Kind),
+                output::key_value("existing", &semantic_match.existing_object, Tone::Warning),
+                output::key_value("proposed", &semantic_match.proposed_object, Tone::Success)
+            ));
         }
     }
-    println!(
-        "review suggested={} target={} reason={}",
-        plan.suggested_action.label(),
-        plan.target_id().unwrap_or("-"),
-        plan.reason
-    );
+    output::line(format!(
+        "{} {} {} {}",
+        output::paint("review", Tone::Info),
+        output::key_value(
+            "suggested",
+            plan.suggested_action.label(),
+            output::action_tone(plan.suggested_action.label())
+        ),
+        output::key_value("target", plan.target_id().unwrap_or("-"), Tone::Id),
+        output::key_value("reason", plan.reason, Tone::Muted)
+    ));
 }
 
 pub fn prompt_for_action(plan: &ReviewPlan) -> Result<ReviewAction> {
@@ -279,8 +294,10 @@ pub fn prompt_for_action(plan: &ReviewPlan) -> Result<ReviewAction> {
     } else {
         "add / no-op / abort"
     };
-    print!("choose {options} [{}]: ", plan.suggested_action.label());
-    io::stdout().flush()?;
+    output::prompt(format!(
+        "choose {options} [{}]: ",
+        plan.suggested_action.label()
+    ))?;
 
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer)? == 0 {

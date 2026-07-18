@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     frontmatter::{self, FieldValue},
+    output,
     workspace::Workspace,
 };
 
@@ -346,7 +347,7 @@ pub fn list_memories(workspace: &Workspace, filter: &MemoryFilter) -> Result<Vec
             Ok(memory) if matches_filter(&memory, filter) => memories.push(memory),
             Ok(_) => {}
             Err(err) => {
-                eprintln!("warn\t{}: {err}", path.display());
+                output::warning(format!("{}: {err}", path.display()));
             }
         }
     }
@@ -422,7 +423,7 @@ pub fn find_memory(
         let memory = match read_memory(&path) {
             Ok(memory) => memory,
             Err(err) => {
-                eprintln!("warn\t{}: {err}", path.display());
+                output::warning(format!("{}: {err}", path.display()));
                 continue;
             }
         };

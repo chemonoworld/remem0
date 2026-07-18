@@ -4,6 +4,7 @@ mod doctor;
 mod frontmatter;
 mod index;
 mod memory;
+mod output;
 mod policy;
 mod review;
 mod search;
@@ -19,12 +20,13 @@ use cli::{Cli, Command, ConfigCommand, ConfigKey, ProfileCommand};
 use color_eyre::eyre::{Result, eyre};
 use config::{AppConfig, ConfigStore, ProfileConfig, StorageMode, normalize_root};
 use memory::{CreateMemoryInput, MemoryFilter};
+use output::Tone;
 use transaction::{ExternalChangePolicy, TransactionOptions};
 use workspace::Workspace;
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err}");
+        output::error(err);
         std::process::exit(1);
     }
 }
@@ -32,6 +34,7 @@ fn main() {
 fn run() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+    output::configure(cli.color);
     let store = ConfigStore::new()?;
 
     match cli.command.unwrap_or(Command::Configure) {
@@ -67,7 +70,12 @@ fn run() -> Result<()> {
                             ));
                         }
                         if memory::bodies_match(&existing.body, &body) {
-                            println!("no-op {} reason=source-identity", existing.metadata.id);
+                            output::line(format!(
+                                "{} {} {}",
+                                output::paint("no-op", Tone::Warning),
+                                output::paint(&existing.metadata.id, Tone::Id),
+                                output::key_value("reason", "source-identity", Tone::Muted)
+                            ));
                             return Ok(());
                         }
                         return Err(eyre!(
@@ -105,10 +113,16 @@ fn run() -> Result<()> {
                     ))
                 },
             )?;
-            println!(
-                "added {} {}",
-                memory.metadata.memory_type, memory.metadata.id
-            );
+            let memory_type = memory.metadata.memory_type.to_string();
+            output::line(output::action(
+                "added",
+                format!(
+                    "{} {}",
+                    output::paint(&memory_type, output::memory_type_tone(&memory_type)),
+                    output::paint(&memory.metadata.id, Tone::Id)
+                ),
+                Tone::Success,
+            ));
             Ok(())
         }
         Command::List(args) => {
@@ -124,21 +138,22 @@ fn run() -> Result<()> {
                 },
             )?;
             for memory in memories {
-                println!(
-                    "{}\t{}\t{}\t{}\t{}",
-                    memory.metadata.id,
-                    memory.metadata.memory_type,
-                    memory.metadata.scope,
-                    memory.metadata.kind,
-                    memory.title()
-                );
+                let memory_type = memory.metadata.memory_type.to_string();
+                let title = memory.title();
+                output::line(output::row([
+                    (memory.metadata.id, Tone::Id),
+                    (memory_type.clone(), output::memory_type_tone(&memory_type)),
+                    (memory.metadata.scope.to_string(), Tone::Scope),
+                    (memory.metadata.kind.to_string(), Tone::Kind),
+                    (title, Tone::Title),
+                ]));
             }
             Ok(())
         }
         Command::Show(args) => {
             let workspace = active_workspace(&store)?;
             let memory = memory::find_memory(&workspace, &args.id, true)?;
-            print!("{}", memory.to_markdown());
+            output::markdown(&memory.to_markdown());
             Ok(())
         }
         Command::Edit(args) => {
@@ -166,7 +181,11 @@ fn run() -> Result<()> {
                     Ok((path, format!("rem: update memory {id}")))
                 },
             )?;
-            println!("edited {}", path.display());
+            output::line(output::action(
+                "edited",
+                output::paint(path.display(), Tone::Path),
+                Tone::Success,
+            ));
             Ok(())
         }
         Command::Update(args) => {
@@ -177,7 +196,12 @@ fn run() -> Result<()> {
             let existing = memory::find_memory(&workspace, &id, false)?;
             memory::ensure_active_memory(&existing, "updated")?;
             if memory::bodies_match(&existing.body, &body) {
-                println!("no-op {} reason=unchanged-body", existing.metadata.id);
+                output::line(format!(
+                    "{} {} {}",
+                    output::paint("no-op", Tone::Warning),
+                    output::paint(&existing.metadata.id, Tone::Id),
+                    output::key_value("reason", "unchanged-body", Tone::Muted)
+                ));
                 return Ok(());
             }
             let id = existing.metadata.id;
@@ -192,7 +216,11 @@ fn run() -> Result<()> {
                     ))
                 },
             )?;
-            println!("updated {}", memory.metadata.id);
+            output::line(output::action(
+                "updated",
+                output::paint(&memory.metadata.id, Tone::Id),
+                Tone::Success,
+            ));
             Ok(())
         }
         Command::Append(args) => run_append(&store, args),
@@ -215,9 +243,17 @@ fn run() -> Result<()> {
                 },
             )?;
             if hard {
-                println!("deleted {}", memory.metadata.id);
+                output::line(output::action(
+                    "deleted",
+                    output::paint(&memory.metadata.id, Tone::Id),
+                    Tone::Error,
+                ));
             } else {
-                println!("archived {}", memory.metadata.id);
+                output::line(output::action(
+                    "archived",
+                    output::paint(&memory.metadata.id, Tone::Id),
+                    Tone::Warning,
+                ));
             }
             Ok(())
         }
@@ -237,7 +273,11 @@ fn run() -> Result<()> {
                     ))
                 },
             )?;
-            println!("promoted {}", memory.metadata.id);
+            output::line(output::action(
+                "promoted",
+                output::paint(&memory.metadata.id, Tone::Id),
+                Tone::Success,
+            ));
             Ok(())
         }
         Command::Commit(args) => run_commit(&store, args),
@@ -251,15 +291,17 @@ fn run() -> Result<()> {
             };
             let results = search::search(&workspace, &args.query(), mode)?;
             for result in results {
-                println!(
-                    "{}\t{}\t{}\t{}\t{:.3}\t{}",
-                    result.id,
-                    result.memory_type,
-                    result.source,
-                    result.title,
-                    result.score,
-                    result.path
-                );
+                output::line(output::row([
+                    (result.id, Tone::Id),
+                    (
+                        result.memory_type.clone(),
+                        output::memory_type_tone(&result.memory_type),
+                    ),
+                    (result.source, Tone::Source),
+                    (result.title, Tone::Title),
+                    (format!("{:.3}", result.score), Tone::Number),
+                    (result.path, Tone::Path),
+                ]));
             }
             Ok(())
         }
@@ -276,39 +318,61 @@ fn run() -> Result<()> {
             )?;
             for fact in facts {
                 if args.source {
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        fact.id,
-                        fact.subject,
-                        fact.relation,
-                        fact.object,
-                        fact.valid_from.as_deref().unwrap_or(""),
-                        fact.valid_to.as_deref().unwrap_or(""),
-                        fact.expired_at.as_deref().unwrap_or(""),
-                        fact.source_memory_id,
-                        fact.confidence
-                            .map(|confidence| confidence.to_string())
-                            .unwrap_or_default(),
-                        fact.source_path,
-                        fact.episode_id,
-                        fact.excerpt
-                    );
+                    output::line(output::row([
+                        (fact.id, Tone::Id),
+                        (fact.subject, Tone::Title),
+                        (fact.relation, Tone::Kind),
+                        (fact.object, Tone::Value),
+                        (
+                            fact.valid_from.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (
+                            fact.valid_to.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (
+                            fact.expired_at.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (fact.source_memory_id, Tone::Id),
+                        (
+                            fact.confidence
+                                .map(|confidence| confidence.to_string())
+                                .unwrap_or_default(),
+                            Tone::Number,
+                        ),
+                        (fact.source_path, Tone::Path),
+                        (fact.episode_id, Tone::Source),
+                        (fact.excerpt, Tone::Muted),
+                    ]));
                 } else {
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        fact.id,
-                        fact.subject,
-                        fact.relation,
-                        fact.object,
-                        fact.valid_from.as_deref().unwrap_or(""),
-                        fact.valid_to.as_deref().unwrap_or(""),
-                        fact.expired_at.as_deref().unwrap_or(""),
-                        fact.learned_at,
-                        fact.confidence
-                            .map(|confidence| confidence.to_string())
-                            .unwrap_or_default(),
-                        fact.source_memory_id
-                    );
+                    output::line(output::row([
+                        (fact.id, Tone::Id),
+                        (fact.subject, Tone::Title),
+                        (fact.relation, Tone::Kind),
+                        (fact.object, Tone::Value),
+                        (
+                            fact.valid_from.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (
+                            fact.valid_to.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (
+                            fact.expired_at.as_deref().unwrap_or("").to_string(),
+                            Tone::Muted,
+                        ),
+                        (fact.learned_at, Tone::Muted),
+                        (
+                            fact.confidence
+                                .map(|confidence| confidence.to_string())
+                                .unwrap_or_default(),
+                            Tone::Number,
+                        ),
+                        (fact.source_memory_id, Tone::Id),
+                    ]));
                 }
             }
             Ok(())
@@ -316,36 +380,68 @@ fn run() -> Result<()> {
         Command::Rebuild => {
             let workspace = active_workspace(&store)?;
             let report = transaction::rebuild_index(&workspace)?;
-            println!(
-                "rebuilt {} indexed={} diagnostics={} semantic_entities={} semantic_episodes={} semantic_facts={}",
-                report.index_path,
-                report.indexed,
-                report.diagnostics,
-                report.semantic_entities,
-                report.semantic_episodes,
-                report.semantic_facts
-            );
+            output::line(output::action(
+                "rebuilt",
+                format!(
+                    "{} {} {} {} {} {}",
+                    output::paint(&report.index_path, Tone::Path),
+                    output::key_value("indexed", report.indexed, Tone::Number),
+                    output::key_value("diagnostics", report.diagnostics, Tone::Number),
+                    output::key_value("semantic_entities", report.semantic_entities, Tone::Number),
+                    output::key_value("semantic_episodes", report.semantic_episodes, Tone::Number),
+                    output::key_value("semantic_facts", report.semantic_facts, Tone::Number)
+                ),
+                Tone::Success,
+            ));
             Ok(())
         }
         Command::Doctor => {
             let config = store.load_or_default()?;
-            println!("config: {}", store.path().display());
+            output::line(output::colon_value(
+                "config",
+                store.path().display(),
+                Tone::Path,
+            ));
             if config.profiles.is_empty() {
-                println!("warn\tno profiles configured; run `rem init --root <path>`");
+                output::line(output::row([
+                    ("warn".to_string(), Tone::Warning),
+                    (
+                        "no profiles configured; run `rem init --root <path>`".to_string(),
+                        Tone::Value,
+                    ),
+                ]));
                 return Ok(());
             }
             let profile = match config.active_profile() {
                 Ok(profile) => profile.clone(),
                 Err(err) => {
-                    println!("warn\t{err}");
+                    output::line(output::row([
+                        ("warn".to_string(), Tone::Warning),
+                        (err.to_string(), Tone::Value),
+                    ]));
                     return Ok(());
                 }
             };
             let workspace = Workspace::new(&profile);
-            println!("active_profile: {}", config.active_profile);
-            println!("root: {}", profile.root.display());
+            output::line(output::colon_value(
+                "active_profile",
+                config.active_profile,
+                Tone::Id,
+            ));
+            output::line(output::colon_value(
+                "root",
+                profile.root.display(),
+                Tone::Path,
+            ));
             for finding in doctor::run(&workspace, profile.storage)? {
-                println!("{}\t{}", finding.level, finding.message);
+                let tone = match finding.level {
+                    doctor::DoctorLevel::Ok => Tone::Success,
+                    doctor::DoctorLevel::Warn => Tone::Warning,
+                };
+                output::line(output::row([
+                    (finding.level.to_string(), tone),
+                    (finding.message, Tone::Value),
+                ]));
             }
             Ok(())
         }
@@ -390,7 +486,11 @@ fn run_init(store: ConfigStore, args: cli::InitArgs) -> Result<()> {
     config.active_profile = profile_name;
     store.save(&config)?;
 
-    println!("initialized {}", workspace.root().display());
+    output::line(output::action(
+        "initialized",
+        output::paint(workspace.root().display(), Tone::Path),
+        Tone::Success,
+    ));
     Ok(())
 }
 
@@ -409,12 +509,17 @@ fn run_review(store: &ConfigStore, args: cli::ReviewArgs) -> Result<()> {
         return Err(eyre!("memory review aborted"));
     }
 
-    println!(
-        "review action={} target={} reason={}",
-        action.label(),
-        plan.target_id().unwrap_or("-"),
-        plan.reason
-    );
+    output::line(format!(
+        "{} {} {} {}",
+        output::paint("review", Tone::Info),
+        output::key_value(
+            "action",
+            action.label(),
+            output::action_tone(action.label())
+        ),
+        output::key_value("target", plan.target_id().unwrap_or("-"), Tone::Id),
+        output::key_value("reason", plan.reason, Tone::Muted)
+    ));
     Ok(())
 }
 
@@ -433,7 +538,11 @@ fn run_append(store: &ConfigStore, args: cli::AppendArgs) -> Result<()> {
                 format!("rem: append memory {}", memory.metadata.id),
             ))
         })?;
-    println!("appended {}", memory.metadata.id);
+    output::line(output::action(
+        "appended",
+        output::paint(&memory.metadata.id, Tone::Id),
+        Tone::Success,
+    ));
     Ok(())
 }
 
@@ -445,7 +554,12 @@ fn run_supersede(store: &ConfigStore, args: cli::SupersedeArgs) -> Result<()> {
 
     let body = args.body();
     if memory::bodies_match(&source.body, &body) && !args.has_metadata_overrides() {
-        println!("no-op {} reason=unchanged-body", source.metadata.id);
+        output::line(format!(
+            "{} {} {}",
+            output::paint("no-op", Tone::Warning),
+            output::paint(&source.metadata.id, Tone::Id),
+            output::key_value("reason", "unchanged-body", Tone::Muted)
+        ));
         return Ok(());
     }
     let memory_type = args.resolved_type(source.metadata.memory_type);
@@ -488,7 +602,13 @@ fn run_supersede(store: &ConfigStore, args: cli::SupersedeArgs) -> Result<()> {
                 ),
             ))
         })?;
-    println!("superseded {} with {}", source_id, replacement.metadata.id);
+    output::line(format!(
+        "{} {} {} {}",
+        output::paint("superseded", Tone::Success),
+        output::paint(&source_id, Tone::Id),
+        output::paint("with", Tone::Muted),
+        output::paint(&replacement.metadata.id, Tone::Id)
+    ));
     Ok(())
 }
 
@@ -497,14 +617,24 @@ fn run_commit(store: &ConfigStore, args: cli::CommitArgs) -> Result<()> {
 
     if args.dry_run {
         let report = transaction::dry_run(&workspace)?;
-        println!("dry-run changes={}", report.changed_paths.len());
+        output::line(format!(
+            "{} {}",
+            output::paint("dry-run", Tone::Info),
+            output::key_value("changes", report.changed_paths.len(), Tone::Number)
+        ));
         for path in &report.changed_paths {
-            println!("would commit\t{path}");
+            output::line(output::row([
+                ("would commit".to_string(), Tone::Info),
+                (path.to_string(), Tone::Path),
+            ]));
         }
-        println!(
-            "dry-run reindex indexed={} diagnostics={}",
-            report.indexed, report.diagnostics
-        );
+        output::line(format!(
+            "{} {} {} {}",
+            output::paint("dry-run", Tone::Info),
+            output::paint("reindex", Tone::Muted),
+            output::key_value("indexed", report.indexed, Tone::Number),
+            output::key_value("diagnostics", report.diagnostics, Tone::Number)
+        ));
         if report.diagnostics > 0 {
             return Err(eyre!(
                 "reindex produced {} diagnostics; commit would fail",
@@ -530,14 +660,23 @@ fn run_commit(store: &ConfigStore, args: cli::CommitArgs) -> Result<()> {
     )?;
 
     if let Some(commit_id) = outcome.commit_id {
-        println!(
-            "committed {} changes={} indexed={}",
-            commit_id,
-            outcome.changed_paths.len(),
-            outcome.indexed
-        );
+        output::line(output::action(
+            "committed",
+            format!(
+                "{} {} {}",
+                output::paint(commit_id, Tone::Id),
+                output::key_value("changes", outcome.changed_paths.len(), Tone::Number),
+                output::key_value("indexed", outcome.indexed, Tone::Number)
+            ),
+            Tone::Success,
+        ));
     } else {
-        println!("nothing to commit indexed={}", outcome.indexed);
+        output::line(format!(
+            "{} {} {}",
+            output::paint("nothing", Tone::Warning),
+            output::paint("to commit", Tone::Muted),
+            output::key_value("indexed", outcome.indexed, Tone::Number)
+        ));
     }
 
     Ok(())
@@ -548,7 +687,10 @@ fn run_profile_command(store: ConfigStore, command: ProfileCommand) -> Result<()
     match command {
         ProfileCommand::List => {
             if config.profiles.is_empty() {
-                println!("no profiles configured; run `rem init --root <path>`");
+                output::line(output::paint(
+                    "no profiles configured; run `rem init --root <path>`",
+                    Tone::Warning,
+                ));
             }
             for profile in &config.profiles {
                 let active = if profile.name == config.active_profile {
@@ -556,21 +698,38 @@ fn run_profile_command(store: ConfigStore, command: ProfileCommand) -> Result<()
                 } else {
                     " "
                 };
-                println!(
+                let marker_tone = if active == "*" {
+                    Tone::Success
+                } else {
+                    Tone::Muted
+                };
+                output::line(format!(
                     "{} {}\t{}\t{}",
-                    active,
-                    profile.name,
-                    profile.storage,
-                    profile.root.display()
-                );
+                    output::paint(active, marker_tone),
+                    output::paint(&profile.name, Tone::Id),
+                    output::paint(profile.storage, Tone::Source),
+                    output::paint(profile.root.display(), Tone::Path)
+                ));
             }
         }
         ProfileCommand::Show { name } => {
             let name = name.unwrap_or_else(|| config.active_profile.clone());
             let profile = config.profile(&name)?;
-            println!("name = {}", profile.name);
-            println!("storage = {}", profile.storage);
-            println!("root = {}", profile.root.display());
+            output::line(format!(
+                "{} = {}",
+                output::paint("name", Tone::Key),
+                output::paint(&profile.name, Tone::Id)
+            ));
+            output::line(format!(
+                "{} = {}",
+                output::paint("storage", Tone::Key),
+                output::paint(profile.storage, Tone::Source)
+            ));
+            output::line(format!(
+                "{} = {}",
+                output::paint("root", Tone::Key),
+                output::paint(profile.root.display(), Tone::Path)
+            ));
         }
         ProfileCommand::Add {
             name,
@@ -588,13 +747,21 @@ fn run_profile_command(store: ConfigStore, command: ProfileCommand) -> Result<()
                 config.active_profile = name.clone();
             }
             store.save(&config)?;
-            println!("added profile {name}");
+            output::line(output::action(
+                "added profile",
+                output::paint(name, Tone::Id),
+                Tone::Success,
+            ));
         }
         ProfileCommand::Use { name } => {
             config.profile(&name)?;
             config.active_profile = name.clone();
             store.save(&config)?;
-            println!("active profile {name}");
+            output::line(output::action(
+                "active profile",
+                output::paint(name, Tone::Id),
+                Tone::Success,
+            ));
         }
     }
     Ok(())
@@ -644,11 +811,15 @@ fn run_config_command(store: ConfigStore, command: ConfigCommand) -> Result<()> 
     match command {
         ConfigCommand::Init => {
             let config = store.ensure_exists()?;
-            println!("created {}", store.path().display());
+            output::line(output::action(
+                "created",
+                output::paint(store.path().display(), Tone::Path),
+                Tone::Success,
+            ));
             print_config(&config)?;
         }
         ConfigCommand::Path => {
-            println!("{}", store.path().display());
+            output::line(output::paint(store.path().display(), Tone::Path));
         }
         ConfigCommand::Show => {
             let config = store.load_or_default()?;
@@ -658,11 +829,21 @@ fn run_config_command(store: ConfigStore, command: ConfigCommand) -> Result<()> 
             let mut config = store.load_or_default()?;
             set_config_value(&mut config, key, value)?;
             store.save(&config)?;
-            println!("updated {} in {}", key, store.path().display());
+            output::line(format!(
+                "{} {} {} {}",
+                output::paint("updated", Tone::Success),
+                output::paint(key, Tone::Key),
+                output::paint("in", Tone::Muted),
+                output::paint(store.path().display(), Tone::Path)
+            ));
         }
         ConfigCommand::Reset => {
             let config = store.reset()?;
-            println!("reset {}", store.path().display());
+            output::line(output::action(
+                "reset",
+                output::paint(store.path().display(), Tone::Path),
+                Tone::Warning,
+            ));
             print_config(&config)?;
         }
     }
@@ -717,6 +898,7 @@ fn run_editor(editor: &str, path: &Path) -> Result<std::process::ExitStatus> {
 }
 
 fn print_config(config: &AppConfig) -> Result<()> {
-    println!("{}", toml::to_string_pretty(config)?);
+    output::toml(&toml::to_string_pretty(config)?);
+    output::line("");
     Ok(())
 }

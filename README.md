@@ -91,6 +91,28 @@ cargo run -- facts --at 2025-04-01
 cargo run -- doctor
 ```
 
+### Color output
+
+`rem` uses semantic colors for status labels, memory IDs and types, metadata,
+paths, scores, review actions, diagnostics, Markdown/TOML documents, and Git
+diffs. Color is enabled automatically for terminal output and disabled when
+stdout or stderr is redirected, so tab-separated output remains safe for
+scripts.
+
+Use the global option before or after a command when an explicit policy is
+needed:
+
+```sh
+rem --color auto list
+rem search mTLS --color always
+rem --color never doctor
+```
+
+`NO_COLOR=1` or `CLICOLOR=0` disables color in `auto` mode.
+`CLICOLOR_FORCE=1` or `FORCE_COLOR=1` enables it even when redirected.
+Explicit `--color always` and `--color never` take precedence over environment
+variables.
+
 The examples use Bash/zsh ANSI-C quoting (`$'...'`) so `\n` becomes a real
 newline. Plain double quotes keep `\n` as literal text, which means `@fact`
 must instead be entered on an actual new line.
