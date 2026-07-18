@@ -836,7 +836,7 @@ fn validate_metadata_scalar(field: &str, value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn canonical_body(body: &str) -> String {
+pub(crate) fn canonical_body(body: &str) -> String {
     body.replace("\r\n", "\n").trim().to_string()
 }
 

@@ -9,7 +9,7 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr};
 use rusqlite::{Connection, params};
 
-use crate::{memory, semantic, workspace::Workspace};
+use crate::{conflict, memory, semantic, workspace::Workspace};
 
 pub fn rebuild(workspace: &Workspace) -> Result<RebuildReport> {
     fs::create_dir_all(workspace.cache_dir())
@@ -126,16 +126,24 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
         }
     }
 
-    let indexed = winners.len();
-    for memory in winners.into_values() {
-        insert_memory(&conn, &memory)?;
-        match insert_semantic(&conn, &memory) {
-            Ok(()) => {}
+    let indexed_memories = winners.into_values().collect::<Vec<_>>();
+    let indexed = indexed_memories.len();
+    let mut extractions = BTreeMap::new();
+    for memory in &indexed_memories {
+        insert_memory(&conn, memory)?;
+        let extraction = semantic::extract(memory).and_then(|extraction| {
+            semantic::insert_extraction(&conn, &extraction, &memory_path_label(memory))?;
+            Ok(extraction)
+        });
+        match extraction {
+            Ok(extraction) => {
+                extractions.insert(memory.metadata.id.clone(), extraction);
+            }
             Err(err) => {
                 diagnostics += 1;
                 insert_diagnostic(
                     &conn,
-                    memory_path_label(&memory),
+                    memory_path_label(memory),
                     "error",
                     format!("semantic cache extraction failed: {err}"),
                 )?;
@@ -143,7 +151,10 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
         }
     }
     semantic::validate_no_duplicate_fact_ids(&conn)?;
+    let conflicts = conflict::detect_current(&indexed_memories, &extractions)?;
+    conflict::insert_conflicts(&conn, &conflicts)?;
     let (semantic_entities, semantic_episodes, semantic_facts) = semantic::fact_counts(&conn)?;
+    let semantic_conflicts = conflict::count(&conn)?;
 
     Ok(RebuildReport {
         indexed,
@@ -151,6 +162,7 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
         semantic_entities,
         semantic_episodes,
         semantic_facts,
+        semantic_conflicts,
         index_path: index_path.display().to_string(),
     })
 }
@@ -237,6 +249,7 @@ CREATE TABLE diagnostics (
 "#,
     )?;
     semantic::create_schema(conn)?;
+    conflict::create_schema(conn)?;
     Ok(())
 }
 
@@ -284,13 +297,6 @@ fn insert_memory(conn: &Connection, memory: &memory::Memory) -> Result<()> {
     Ok(())
 }
 
-fn insert_semantic(conn: &Connection, memory: &memory::Memory) -> Result<()> {
-    let path = memory_path_label(memory);
-    let extraction = semantic::extract(memory)?;
-    semantic::insert_extraction(conn, &extraction, &path)?;
-    Ok(())
-}
-
 fn insert_diagnostic(
     conn: &Connection,
     path: String,
@@ -319,5 +325,6 @@ pub struct RebuildReport {
     pub semantic_entities: usize,
     pub semantic_episodes: usize,
     pub semantic_facts: usize,
+    pub semantic_conflicts: usize,
     pub index_path: String,
 }

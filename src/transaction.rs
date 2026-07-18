@@ -152,6 +152,15 @@ pub fn run_mutation_with_message<T>(
     options: TransactionOptions,
     apply: impl FnOnce() -> Result<(T, String)>,
 ) -> Result<(T, TransactionOutcome)> {
+    run_mutation_with_message_checked(workspace, options, apply, |_| Ok(()))
+}
+
+pub fn run_mutation_with_message_checked<T>(
+    workspace: &Workspace,
+    options: TransactionOptions,
+    apply: impl FnOnce() -> Result<(T, String)>,
+    validate: impl FnOnce(&index::RebuildReport) -> Result<()>,
+) -> Result<(T, TransactionOutcome)> {
     let mut tx = Transaction::begin(workspace, options)?;
 
     let (result, message) = match ensure_gitignore(workspace).and_then(|_| apply()) {
@@ -169,6 +178,11 @@ pub fn run_mutation_with_message<T>(
             return Err(err);
         }
     };
+
+    if let Err(err) = validate(&report) {
+        tx.rollback()?;
+        return Err(err);
+    }
 
     let outcome = match tx.git_commit(&message, report.indexed) {
         Ok(outcome) => outcome,

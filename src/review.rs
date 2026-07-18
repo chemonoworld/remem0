@@ -174,7 +174,7 @@ pub fn semantic_plan(workspace: &Workspace, body: &str, scope: MemoryScope) -> R
                     continue;
                 }
 
-                let same_object = same_semantic_object(proposed_fact, existing_fact);
+                let same_object = semantic::semantic_objects_match(proposed_fact, existing_fact);
                 let (suggested_action, reason) =
                     semantic_action(&proposed_fact.relation, same_object);
                 let candidate = ReviewCandidate {
@@ -350,25 +350,6 @@ fn entity_names(extraction: &semantic::SemanticExtraction) -> BTreeMap<String, S
         .iter()
         .map(|entity| (entity.id.clone(), entity.canonical_name.clone()))
         .collect()
-}
-
-fn same_semantic_object(left: &semantic::SemanticFact, right: &semantic::SemanticFact) -> bool {
-    match (&left.object_id, &right.object_id) {
-        (Some(left), Some(right)) => left == right,
-        (None, None) => {
-            canonical_semantic_value(&left.object_value)
-                == canonical_semantic_value(&right.object_value)
-        }
-        _ => false,
-    }
-}
-
-fn canonical_semantic_value(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
 }
 
 fn semantic_action(relation: &str, same_object: bool) -> (ReviewAction, &'static str) {

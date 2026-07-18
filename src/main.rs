@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod conflict;
 mod doctor;
 mod frontmatter;
 mod index;
@@ -13,9 +14,9 @@ mod transaction;
 mod tui;
 mod workspace;
 
-use std::{env, path::Path, process::Command as ProcessCommand};
+use std::{env, fs, path::Path, process::Command as ProcessCommand};
 
-use cli::{Cli, Command, ConfigCommand, ConfigKey, ProfileCommand};
+use cli::{Cli, Command, ConfigCommand, ConfigKey, ConflictCommand, ProfileCommand};
 use color_eyre::eyre::{Result, eyre};
 use config::{AppConfig, ConfigStore, ProfileConfig, StorageMode, normalize_root};
 use memory::{CreateMemoryInput, MemoryFilter};
@@ -402,19 +403,25 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Command::Conflict { command } => run_conflict_command(&store, command),
         Command::Rebuild => {
             let workspace = active_workspace(&store)?;
             let report = transaction::rebuild_index(&workspace)?;
             output::line(output::action(
                 "rebuilt",
                 format!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {}",
                     output::paint(&report.index_path, Tone::Path),
                     output::key_value("indexed", report.indexed, Tone::Number),
                     output::key_value("diagnostics", report.diagnostics, Tone::Number),
                     output::key_value("semantic_entities", report.semantic_entities, Tone::Number),
                     output::key_value("semantic_episodes", report.semantic_episodes, Tone::Number),
-                    output::key_value("semantic_facts", report.semantic_facts, Tone::Number)
+                    output::key_value("semantic_facts", report.semantic_facts, Tone::Number),
+                    output::key_value(
+                        "semantic_conflicts",
+                        report.semantic_conflicts,
+                        Tone::Number
+                    )
                 ),
                 Tone::Success,
             ));
@@ -546,6 +553,254 @@ fn run_review(store: &ConfigStore, args: cli::ReviewArgs) -> Result<()> {
         output::key_value("reason", plan.reason, Tone::Muted)
     ));
     Ok(())
+}
+
+fn run_conflict_command(store: &ConfigStore, command: ConflictCommand) -> Result<()> {
+    let workspace = active_workspace(store)?;
+    match command {
+        ConflictCommand::List(args) => {
+            let conn = conflict::open_index(&workspace.index_path())?;
+            let conflicts = conflict::query(&conn, args.kind.map(Into::into), args.scope)?;
+            let rows = conflicts
+                .into_iter()
+                .map(|conflict| {
+                    [
+                        (conflict.id, Tone::Id),
+                        (conflict.kind.to_string(), Tone::Kind),
+                        (conflict.scope.to_string(), Tone::Scope),
+                        (
+                            conflict.subject.unwrap_or_else(|| "-".to_string()),
+                            Tone::Title,
+                        ),
+                        (
+                            conflict.relation.unwrap_or_else(|| "-".to_string()),
+                            Tone::Kind,
+                        ),
+                        (conflict.members.len().to_string(), Tone::Number),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            if output::stdout_is_terminal() {
+                let headers = ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"];
+                let widths = std::array::from_fn(|index| {
+                    rows.iter()
+                        .map(|row| row[index].0.chars().count())
+                        .chain([headers[index].len()])
+                        .max()
+                        .unwrap_or_default()
+                });
+                output::line(output::table_row(
+                    headers.map(|header| (header.to_string(), Tone::Key)),
+                    widths,
+                ));
+                for row in rows {
+                    output::line(output::table_row(row, widths));
+                }
+            } else {
+                for row in rows {
+                    output::line(output::row(row));
+                }
+            }
+            Ok(())
+        }
+        ConflictCommand::Show(args) => {
+            let conn = conflict::open_index(&workspace.index_path())?;
+            let conflict = conflict::find(&conn, &args.id)?;
+            print_conflict(&conflict);
+            Ok(())
+        }
+        ConflictCommand::Resolve(args) => run_conflict_resolve(&workspace, args),
+    }
+}
+
+fn print_conflict(conflict: &conflict::Conflict) {
+    output::line(output::colon_value("id", &conflict.id, Tone::Id));
+    output::line(output::colon_value("kind", conflict.kind, Tone::Kind));
+    output::line(output::colon_value("scope", conflict.scope, Tone::Scope));
+    output::line(output::colon_value(
+        "subject_id",
+        conflict.subject_id.as_deref().unwrap_or("-"),
+        Tone::Id,
+    ));
+    output::line(output::colon_value(
+        "subject",
+        conflict.subject.as_deref().unwrap_or("-"),
+        Tone::Title,
+    ));
+    output::line(output::colon_value(
+        "relation",
+        conflict.relation.as_deref().unwrap_or("-"),
+        Tone::Kind,
+    ));
+    output::line(output::colon_value(
+        "members",
+        conflict.members.len(),
+        Tone::Number,
+    ));
+    for (index, member) in conflict.members.iter().enumerate() {
+        output::line("");
+        output::line(output::colon_value("member", index + 1, Tone::Number));
+        output::line(output::colon_value(
+            "memory_id",
+            &member.memory_id,
+            Tone::Id,
+        ));
+        output::line(output::colon_value(
+            "memory_path",
+            &member.memory_path,
+            Tone::Path,
+        ));
+        output::line(output::colon_value(
+            "memory_title",
+            &member.memory_title,
+            Tone::Title,
+        ));
+        output::line(output::colon_value("excerpt", &member.excerpt, Tone::Muted));
+        if let Some(fact) = &member.fact {
+            output::line(output::colon_value("fact_id", &fact.id, Tone::Id));
+            output::line(output::colon_value(
+                "object_id",
+                fact.object_id.as_deref().unwrap_or("-"),
+                Tone::Id,
+            ));
+            output::line(output::colon_value(
+                "object",
+                &fact.object_value,
+                Tone::Value,
+            ));
+            output::line(output::colon_value(
+                "valid_from",
+                fact.valid_from.as_deref().unwrap_or("-"),
+                Tone::Muted,
+            ));
+            output::line(output::colon_value(
+                "valid_to",
+                fact.valid_to.as_deref().unwrap_or("-"),
+                Tone::Muted,
+            ));
+            output::line(output::colon_value(
+                "learned_at",
+                &fact.learned_at,
+                Tone::Muted,
+            ));
+            output::line(output::colon_value(
+                "expired_at",
+                fact.expired_at.as_deref().unwrap_or("-"),
+                Tone::Muted,
+            ));
+            output::line(output::colon_value(
+                "confidence",
+                fact.confidence
+                    .map(|confidence| confidence.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                Tone::Number,
+            ));
+            output::line(output::colon_value("line", fact.line_number, Tone::Number));
+        }
+    }
+}
+
+fn run_conflict_resolve(workspace: &Workspace, args: cli::ConflictResolveArgs) -> Result<()> {
+    let requested_expiration = args
+        .at
+        .as_deref()
+        .map(semantic::parse_time_to_unix_seconds)
+        .transpose()?;
+    let conflict_id = args.id;
+    let keep = args.keep;
+    let options = transaction_options(args.tx)?;
+    let ((resolution, kind), outcome) = transaction::run_mutation_with_message_checked(
+        workspace,
+        options,
+        || {
+            let current = refreshed_conflict(workspace, &conflict_id)?;
+            let kind = current.kind;
+            let resolution =
+                conflict::apply_resolution(workspace, &current, &keep, requested_expiration)?;
+            let message = match kind {
+                conflict::ConflictKind::ExactActiveDuplicate => format!(
+                    "rem: resolve duplicate conflict {} keep memory {}",
+                    current.id, resolution.kept_id
+                ),
+                conflict::ConflictKind::ExclusiveCurrent => format!(
+                    "rem: resolve semantic conflict {} keep fact {}",
+                    current.id, resolution.kept_id
+                ),
+            };
+            Ok(((resolution, kind), message))
+        },
+        |_| {
+            let conn = conflict::open_index(&workspace.index_path())?;
+            if conflict::find_exact(&conn, &conflict_id)?.is_some() {
+                return Err(eyre!(
+                    "conflict {conflict_id} remains after resolution; rolled back without committing"
+                ));
+            }
+            Ok(())
+        },
+    )?;
+
+    output::line(format!(
+        "{} {} {} {} {} {}",
+        output::paint("resolved", Tone::Success),
+        output::paint(&resolution.conflict_id, Tone::Id),
+        output::key_value("kind", kind, Tone::Kind),
+        output::key_value("kept", &resolution.kept_id, Tone::Id),
+        output::key_value(
+            "archived",
+            resolution.archived_memory_ids.len(),
+            Tone::Number
+        ),
+        output::key_value("expired", resolution.expired_fact_ids.len(), Tone::Number)
+    ));
+    if let Some(expired_at) = resolution.expired_at {
+        output::line(output::colon_value("expired_at", expired_at, Tone::Muted));
+    }
+    for memory_id in &resolution.archived_memory_ids {
+        output::line(output::row([
+            ("archived".to_string(), Tone::Warning),
+            (memory_id.clone(), Tone::Id),
+        ]));
+    }
+    for fact_id in &resolution.expired_fact_ids {
+        output::line(output::row([
+            ("expired".to_string(), Tone::Warning),
+            (fact_id.clone(), Tone::Id),
+        ]));
+    }
+    if let Some(commit_id) = outcome.commit_id {
+        output::line(output::colon_value("commit", commit_id, Tone::Id));
+    }
+    Ok(())
+}
+
+fn refreshed_conflict(workspace: &Workspace, id_or_prefix: &str) -> Result<conflict::Conflict> {
+    let temp_path = index::temp_index_path(workspace, "conflict-resolve");
+    let result = (|| {
+        let report = index::rebuild_to_path(workspace, &temp_path)?;
+        if report.diagnostics > 0 {
+            let details = index::diagnostic_messages(&temp_path)?.join("\n");
+            return Err(eyre!(
+                "reindex produced {} diagnostics; fix malformed or duplicate memory files before resolving conflicts:\n{}",
+                report.diagnostics,
+                details
+            ));
+        }
+        let conn = conflict::open_index(&temp_path)?;
+        conflict::find(&conn, id_or_prefix)
+    })();
+    match fs::remove_file(&temp_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) if result.is_ok() => {
+            return Err(eyre!(
+                "failed to remove temporary conflict index {}: {err}",
+                temp_path.display()
+            ));
+        }
+        Err(_) => {}
+    }
+    result
 }
 
 fn run_append(store: &ConfigStore, args: cli::AppendArgs) -> Result<()> {

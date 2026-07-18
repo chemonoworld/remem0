@@ -1350,6 +1350,870 @@ fn semantic_fact_directives_support_current_historical_and_source_queries() {
 }
 
 #[test]
+fn semantic_conflict_core_is_deterministic_non_blocking_and_rebuildable() {
+    let project = TempProject::new("semantic-conflict-core");
+    project.init_rem("local");
+
+    let old_preference = project.rem_ok(&[
+        "add",
+        "--long",
+        "# Old editor\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    let old_preference_id = old_preference
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string();
+    let new_preference = project.rem_ok(&[
+        "add",
+        "--long",
+        "# New editor\n@fact User | PREFERS | Helix | valid_from=2021-01-01",
+    ]);
+    let new_preference_id = new_preference
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string();
+    let duplicate_body = "# Duplicate note\nidentical active content";
+    let duplicate = project.rem_ok(&["add", duplicate_body]);
+    let duplicate_id = duplicate.split_whitespace().last().unwrap().to_string();
+    let second_duplicate = project.rem_ok(&["add", duplicate_body]);
+    let second_duplicate_id = second_duplicate
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string();
+
+    let rebuild = project.rem_ok(&["rebuild"]);
+    assert!(rebuild.contains("diagnostics=0"));
+    assert!(rebuild.contains("semantic_conflicts=2"));
+    assert_git_clean(&project);
+
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let conflict_rows = |path: &Path| {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, scope, subject, relation, member_count
+                 FROM semantic_conflicts ORDER BY kind, id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    let before = conflict_rows(&index_path);
+    assert_eq!(before.len(), 2);
+    assert_eq!(before[0].1, "exact-active-duplicate");
+    assert_eq!(before[0].2, "user");
+    assert_eq!(before[0].3, None);
+    assert_eq!(before[0].4, None);
+    assert_eq!(before[0].5, 2);
+    assert_eq!(before[1].1, "exclusive-current-conflict");
+    assert_eq!(before[1].2, "user");
+    assert_eq!(before[1].3.as_deref(), Some("User"));
+    assert_eq!(before[1].4.as_deref(), Some("PREFERS"));
+    assert_eq!(before[1].5, 2);
+
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    let duplicate_evidence_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM semantic_conflict_members WHERE fact_id IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(duplicate_evidence_count, 2);
+    let fact_evidence = conn
+        .prepare(
+            "SELECT memory_id, object_value, fact_id, memory_path, excerpt
+             FROM semantic_conflict_members
+             WHERE object_value IS NOT NULL
+             ORDER BY memory_id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(fact_evidence.len(), 2);
+    assert!(fact_evidence.iter().any(|row| {
+        row.0 == old_preference_id
+            && row.1 == "Vim"
+            && row.2.starts_with("fact-")
+            && row.3.contains("memories/long/")
+            && row.4.contains("Old editor")
+    }));
+    assert!(fact_evidence.iter().any(|row| {
+        row.0 == new_preference_id && row.1 == "Helix" && row.4.contains("New editor")
+    }));
+    drop(conn);
+
+    project.rem_ok(&["rebuild"]);
+    assert_eq!(conflict_rows(&index_path), before);
+
+    project.rem_ok(&[
+        "update",
+        &old_preference_id,
+        "# Old editor\n@fact User | PREFERS | Vim | valid_from=2020-01-01 | valid_to=2021-01-01",
+    ]);
+    let after_temporal_resolution = conflict_rows(&index_path);
+    assert_eq!(after_temporal_resolution.len(), 1);
+    assert_eq!(after_temporal_resolution[0].1, "exact-active-duplicate");
+
+    project.rem_ok(&[
+        "update",
+        &duplicate_id,
+        "# Unique note\nconflict source removed",
+    ]);
+    assert!(conflict_rows(&index_path).is_empty());
+    assert_ne!(duplicate_id, second_duplicate_id);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_list_show_filters_alias_and_doctor_are_actionable() {
+    let project = TempProject::new("conflict-read-workflow");
+    project.init_rem("local");
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Editor A\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Editor B\n@fact User | PREFERS | Helix | valid_from=2021-01-01",
+    ]);
+    project.rem_ok(&["add", "# Duplicate\nsame body"]);
+    project.rem_ok(&["add", "# Duplicate\nsame body"]);
+
+    let listed = project.rem_ok(&["conflict", "list"]);
+    assert_eq!(listed.lines().count(), 2);
+    let duplicate_id = conflict_id_for_kind(&listed, "exact-active-duplicate");
+    let semantic_id = conflict_id_for_kind(&listed, "exclusive-current-conflict");
+    assert_eq!(project.rem_ok(&["conflicts", "list"]), listed);
+
+    let duplicate_only =
+        project.rem_ok(&["conflict", "list", "--kind", "duplicate", "--scope", "user"]);
+    assert!(duplicate_only.contains(&duplicate_id));
+    assert!(!duplicate_only.contains(&semantic_id));
+
+    let shown = project.rem_ok(&["conflict", "show", &semantic_id[..semantic_id.len() - 2]]);
+    assert!(shown.contains(&format!("id: {semantic_id}")));
+    assert!(shown.contains("kind: exclusive-current-conflict"));
+    assert!(shown.contains("subject: User"));
+    assert!(shown.contains("relation: PREFERS"));
+    assert!(shown.contains("fact_id: fact-"));
+    assert!(shown.contains("object: Vim"));
+    assert!(shown.contains("object: Helix"));
+    assert!(shown.contains("memory_path:"));
+
+    let ambiguous = project.rem_err(&["conflict", "show", "conflict-"]);
+    assert!(ambiguous.contains("ambiguous across 2 conflicts"));
+
+    let doctor = project.rem_ok(&["doctor"]);
+    assert!(doctor.contains("semantic conflicts pending: 2"));
+    assert!(doctor.contains("rem conflict list"));
+
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE semantic_conflict_members;
+         DROP TABLE semantic_conflicts;",
+    )
+    .unwrap();
+    drop(conn);
+    let missing_schema = project.rem_err(&["conflict", "list"]);
+    assert!(missing_schema.contains("semantic conflict cache schema missing"));
+    assert!(missing_schema.contains("rem rebuild"));
+    let doctor = project.rem_ok(&["doctor"]);
+    assert!(doctor.contains("semantic conflict cache schema missing"));
+
+    project.rem_ok(&["rebuild"]);
+    assert_eq!(project.rem_ok(&["conflict", "list"]), listed);
+
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    conn.execute(
+        "UPDATE semantic_conflicts SET member_count = 99 WHERE id = ?1",
+        [&duplicate_id],
+    )
+    .unwrap();
+    drop(conn);
+    let corrupt = project.rem_err(&["conflict", "list"]);
+    assert!(corrupt.contains("declares 99 members but stores 2"));
+    let doctor = project.rem_ok(&["doctor"]);
+    assert!(doctor.contains("semantic conflict cache is unreadable"));
+    assert!(doctor.contains("rem rebuild"));
+    project.rem_ok(&["rebuild"]);
+    assert_eq!(project.rem_ok(&["conflict", "list"]), listed);
+
+    fs::remove_file(&index_path).unwrap();
+    let missing = project.rem_err(&["conflict", "list"]);
+    assert!(missing.contains("semantic conflict index missing"));
+    assert!(missing.contains("rem rebuild"));
+    assert!(project.rem_ok(&["doctor"]).contains("index missing"));
+    project.rem_ok(&["rebuild"]);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn resolving_duplicate_conflict_archives_every_loser_in_one_commit() {
+    let project = TempProject::new("resolve-duplicate");
+    project.init_rem("local");
+    let first = added_id(&project.rem_ok(&["add", "# Same\nidentical"]));
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nidentical"]));
+    let third = added_id(&project.rem_ok(&["add", "# Same\nidentical"]));
+    let listed = project.rem_ok(&["conflict", "list"]);
+    let conflict_id = conflict_id_for_kind(&listed, "exact-active-duplicate");
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let invalid = project.rem_err(&["conflict", "resolve", &conflict_id, "--keep", "missing"]);
+    assert!(invalid.contains("does not identify a memory"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+
+    let invalid_time = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &kept,
+        "--at",
+        "1",
+    ]);
+    assert!(invalid_time.contains("--at only applies"));
+    assert_eq!(project.head(), head);
+
+    let resolved = project.rem_ok(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+    assert!(resolved.contains(&format!("resolved {conflict_id}")));
+    assert!(resolved.contains(&format!("kept={kept}")));
+    assert!(resolved.contains("archived=2"));
+    assert!(resolved.contains("expired=0"));
+    assert_ne!(project.head(), head);
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: resolve duplicate conflict {conflict_id} keep memory {kept}")
+    );
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+    assert!(
+        project
+            .rem_ok(&["show", &first])
+            .contains("status: archived")
+    );
+    assert!(
+        project
+            .rem_ok(&["show", &third])
+            .contains("status: archived")
+    );
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts are clear")
+    );
+
+    let resolved_head = project.head();
+    let stale = project.rem_err(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+    assert!(stale.contains("no semantic conflict found"));
+    assert_eq!(project.head(), resolved_head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn resolving_semantic_conflict_expires_only_competing_objects() {
+    let project = TempProject::new("resolve-semantic");
+    project.init_rem("local");
+    let vim_a = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# Vim A\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]));
+    let vim_b = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# Vim B\n@fact user | prefers | vim | valid_from=2021-01-01",
+    ]));
+    let helix = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# Helix\n@fact User | PREFERS | Helix | valid_from=2022-01-01",
+    ]));
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let keep_fact = semantic_fact_id(&index_path, &vim_a, "Vim");
+    let helix_fact = semantic_fact_id(&index_path, &helix, "Helix");
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exclusive-current-conflict",
+    );
+
+    let resolved = project.rem_ok(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "2025-01-01T12:34:56Z",
+    ]);
+    assert!(resolved.contains("archived=0"));
+    assert!(resolved.contains("expired=1"));
+    assert!(resolved.contains(&helix_fact));
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    let current_vim = conn
+        .query_row(
+            "SELECT COUNT(*) FROM semantic_facts
+             WHERE lower(object_value) = 'vim' AND expired_at IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    let expired_helix = conn
+        .query_row(
+            "SELECT expired_at FROM semantic_facts WHERE id = ?1",
+            [&helix_fact],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(current_vim, 2);
+    assert_eq!(expired_helix, "2025-01-01T12:34:56Z");
+    drop(conn);
+
+    let current = project.rem_ok(&["facts", "--entity", "User"]);
+    assert!(current.contains(&vim_a));
+    assert!(current.contains(&vim_b));
+    assert!(!current.contains(&helix));
+    let historical = project.rem_ok(&["facts", "--entity", "User", "--all"]);
+    assert!(historical.contains(&helix));
+    assert!(historical.contains("2025-01-01T12:34:56Z"));
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: resolve semantic conflict {conflict_id} keep fact {keep_fact}")
+    );
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_resolution_handles_same_memory_and_mixed_time_formats() {
+    let project = TempProject::new("resolve-mixed-time");
+    project.init_rem("local");
+    let memory_id = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# Employment\n@fact User | WORKS_AT | KeepCo | valid_from=2020-01-01\n@fact User | WORKS_AT | UnixCo | valid_from=1\n@fact User | WORKS_AT | IsoCo | valid_from=2019-01-01",
+    ]));
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let keep_fact = semantic_fact_id(&index_path, &memory_id, "KeepCo");
+    let learned_before = semantic_learned_at_rows(&index_path, &memory_id);
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exclusive-current-conflict",
+    );
+
+    let resolved = project.rem_ok(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "2025-01-01T00:00:00Z",
+    ]);
+    assert!(resolved.contains("expired=2"));
+    let shown = project.rem_ok(&["show", &memory_id]);
+    assert!(shown.contains("@fact User | WORKS_AT | KeepCo | valid_from=2020-01-01"));
+    assert!(
+        shown.contains("@fact User | WORKS_AT | UnixCo | valid_from=1 | expired_at=1735689600")
+    );
+    assert!(shown.contains(
+        "@fact User | WORKS_AT | IsoCo | valid_from=2019-01-01 | expired_at=2025-01-01T00:00:00Z"
+    ));
+    assert_eq!(
+        semantic_learned_at_rows(&index_path, &memory_id),
+        learned_before
+    );
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_resolution_failures_roll_back_markdown_index_and_git() {
+    let project = TempProject::new("resolve-rollback");
+    project.init_rem("local");
+    let old = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# Old\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]));
+    let new = added_id(&project.rem_ok(&[
+        "add",
+        "--long",
+        "# New\n@fact User | PREFERS | Helix | valid_from=2021-01-01",
+    ]));
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let keep_fact = semantic_fact_id(&index_path, &new, "Helix");
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exclusive-current-conflict",
+    );
+    let head = project.head();
+    let index_before = fs::read(&index_path).unwrap();
+    let old_before = project.rem_ok(&["show", &old]);
+
+    let too_early = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "2019-01-01",
+    ]);
+    assert!(too_early.contains("expired_at must be later than valid_from"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert_eq!(project.rem_ok(&["show", &old]), old_before);
+
+    let future = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "9999-01-01",
+    ]);
+    assert!(future.contains("is in the future"));
+    assert_eq!(project.head(), head);
+
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+    let commit_failure = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "2025-01-01",
+    ]);
+    assert!(commit_failure.contains("git commit failed"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert_eq!(project.rem_ok(&["show", &old]), old_before);
+    assert!(project.rem_ok(&["conflict", "list"]).contains(&conflict_id));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_resolution_refreshes_external_edits_before_writing() {
+    let project = TempProject::new("resolve-stale-external");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nexternal"]));
+    let changed = added_id(&project.rem_ok(&["add", "# Same\nexternal"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let changed_path = project
+        .vault
+        .join("memories/short")
+        .join(format!("{changed}.md"));
+    let raw = fs::read_to_string(&changed_path).unwrap();
+    fs::write(
+        &changed_path,
+        raw.replace("# Same\nexternal", "# Unique\nexternal edit"),
+    )
+    .unwrap();
+    let head = project.head();
+
+    let stale = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &kept,
+        "--accept-external",
+    ]);
+    assert!(stale.contains("no semantic conflict found"));
+    assert_eq!(project.head(), head);
+    assert!(
+        fs::read_to_string(&changed_path)
+            .unwrap()
+            .contains("# Unique")
+    );
+    assert!(project.status_short().contains(&format!("{changed}.md")));
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+
+    project.rem_ok(&["commit", "--accept-external"]);
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_resolution_restores_external_edits_before_selecting_members() {
+    let project = TempProject::new("resolve-restore-external");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nrestore me"]));
+    let loser = added_id(&project.rem_ok(&["add", "# Same\nrestore me"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let loser_path = project
+        .vault
+        .join("memories/short")
+        .join(format!("{loser}.md"));
+    let raw = fs::read_to_string(&loser_path).unwrap();
+    fs::write(
+        &loser_path,
+        raw.replace("# Same\nrestore me", "# Dirty\nmanual change"),
+    )
+    .unwrap();
+
+    let head = project.head();
+    let blocked = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &kept,
+        "--non-interactive",
+    ]);
+    assert!(blocked.contains("external vault changes detected"));
+    assert!(blocked.contains("--accept-external"));
+    assert_eq!(project.head(), head);
+    assert!(
+        fs::read_to_string(&loser_path)
+            .unwrap()
+            .contains("manual change")
+    );
+
+    let resolved = project.rem_ok(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &kept,
+        "--restore-external",
+        "--non-interactive",
+    ]);
+    assert!(resolved.contains("archived=1"));
+    let archived = project.rem_ok(&["show", &loser]);
+    assert!(archived.contains("status: archived"));
+    assert!(archived.contains("# Same\nrestore me"));
+    assert!(!archived.contains("manual change"));
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn duplicate_and_semantic_conflicts_resolve_as_independent_chain_steps() {
+    let project = TempProject::new("resolve-conflict-chain");
+    project.init_rem("local");
+    let body = "# Employment\n@fact User | WORKS_AT | OldCo | valid_from=2020-01-01\n@fact User | WORKS_AT | NewCo | valid_from=2021-01-01";
+    let kept = added_id(&project.rem_ok(&["add", "--long", body]));
+    let archived = added_id(&project.rem_ok(&["add", "--long", body]));
+
+    let listed = project.rem_ok(&["conflict", "list"]);
+    let duplicate_id = conflict_id_for_kind(&listed, "exact-active-duplicate");
+    let semantic_id = conflict_id_for_kind(&listed, "exclusive-current-conflict");
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts pending: 2")
+    );
+
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+    let ambiguous = project.rem_err(&["conflict", "resolve", "conflict-", "--keep", &kept]);
+    assert!(ambiguous.contains("ambiguous across 2 conflicts"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+
+    project.rem_ok(&["conflict", "resolve", &duplicate_id, "--keep", &kept]);
+    let after_duplicate = project.rem_ok(&["conflict", "list"]);
+    assert!(!after_duplicate.contains(&duplicate_id));
+    assert!(after_duplicate.contains(&semantic_id));
+    assert_eq!(after_duplicate.lines().count(), 1);
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts pending: 1")
+    );
+    assert!(
+        project
+            .rem_ok(&["show", &archived])
+            .contains("status: archived")
+    );
+
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let keep_fact = semantic_fact_id(&index_path, &kept, "NewCo");
+    project.rem_ok(&[
+        "conflict",
+        "resolve",
+        &semantic_id,
+        "--keep",
+        &keep_fact,
+        "--at",
+        "2025-01-01",
+    ]);
+
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts are clear")
+    );
+    assert_git_clean(&project);
+}
+
+#[test]
+fn duplicate_resolution_crosses_short_and_long_storage() {
+    let project = TempProject::new("resolve-cross-storage");
+    project.init_rem("local");
+    let short = added_id(&project.rem_ok(&["add", "--short", "# Same\ncross storage"]));
+    let long = added_id(&project.rem_ok(&["add", "--long", "# Same\ncross storage"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+
+    project.rem_ok(&["conflict", "resolve", &conflict_id, "--keep", &long]);
+
+    let kept = project.rem_ok(&["show", &long]);
+    let archived = project.rem_ok(&["show", &short]);
+    assert!(kept.contains("type: long"));
+    assert!(kept.contains("status: active"));
+    assert!(archived.contains("type: short"));
+    assert!(archived.contains("status: archived"));
+    assert!(
+        project
+            .vault
+            .join("archive")
+            .join(format!("{short}.md"))
+            .is_file()
+    );
+    assert!(
+        !project
+            .vault
+            .join("memories/short")
+            .join(format!("{short}.md"))
+            .exists()
+    );
+    assert!(
+        project
+            .vault
+            .join("memories/long")
+            .join(format!("{long}.md"))
+            .is_file()
+    );
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_list_keeps_control_characters_inside_one_tsv_cell() {
+    let project = TempProject::new("conflict-tsv-cell");
+    project.init_rem("local");
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Vim\n@fact User\tName | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Helix\n@fact User\tName | PREFERS | Helix | valid_from=2021-01-01",
+    ]);
+
+    let listed = project.rem_ok(&["conflict", "list"]);
+    let columns = listed.trim_end().split('\t').collect::<Vec<_>>();
+    assert_eq!(columns.len(), 6, "unexpected TSV output: {listed:?}");
+    assert_eq!(columns[3], "User Name");
+    assert!(!listed.contains('\r'));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_resolution_rejects_cache_only_conflict_ids() {
+    let project = TempProject::new("resolve-tampered-cache");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\ncache evidence"]));
+    let other = added_id(&project.rem_ok(&["add", "# Same\ncache evidence"]));
+    let real_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let fake_id = "conflict-cache-only";
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    conn.execute(
+        "INSERT INTO semantic_conflicts (
+             id, kind, scope, subject_id, subject, relation, member_count
+         )
+         SELECT ?1, kind, scope, subject_id, subject, relation, member_count
+         FROM semantic_conflicts WHERE id = ?2",
+        [fake_id, &real_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO semantic_conflict_members (
+             conflict_id, ordinal, memory_id, memory_path, memory_title, excerpt,
+             fact_id, object_id, object_value, valid_from, valid_to, learned_at,
+             expired_at, confidence, line_number
+         )
+         SELECT ?1, ordinal, memory_id, memory_path, memory_title, excerpt,
+                fact_id, object_id, object_value, valid_from, valid_to, learned_at,
+                expired_at, confidence, line_number
+         FROM semantic_conflict_members WHERE conflict_id = ?2",
+        [fake_id, &real_id],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(project.rem_ok(&["conflict", "list"]).contains(fake_id));
+
+    let head = project.head();
+    let kept_before = project.rem_ok(&["show", &kept]);
+    let other_before = project.rem_ok(&["show", &other]);
+    let error = project.rem_err(&["conflict", "resolve", fake_id, "--keep", &kept]);
+    assert!(error.contains("no semantic conflict found"));
+    assert_eq!(project.head(), head);
+    assert_eq!(project.rem_ok(&["show", &kept]), kept_before);
+    assert_eq!(project.rem_ok(&["show", &other]), other_before);
+    assert!(project.rem_ok(&["conflict", "list"]).contains(fake_id));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_resolution_ignores_tampered_cached_members() {
+    let project = TempProject::new("resolve-tampered-members");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\npoisoned evidence"]));
+    let loser = added_id(&project.rem_ok(&["add", "# Same\npoisoned evidence"]));
+    let decoy = added_id(&project.rem_ok(&["add", "# Unique\nmust stay active"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let conn = rusqlite::Connection::open(&index_path).unwrap();
+    conn.execute(
+        "UPDATE semantic_conflict_members
+         SET memory_id = ?1, memory_path = 'memories/short/decoy.md',
+             memory_title = 'poisoned decoy', excerpt = 'poisoned decoy'
+         WHERE conflict_id = ?2 AND memory_id = ?3",
+        [&decoy, &conflict_id, &loser],
+    )
+    .unwrap();
+    drop(conn);
+    let poisoned = project.rem_ok(&["conflict", "show", &conflict_id]);
+    assert!(poisoned.contains(&decoy));
+    assert!(!poisoned.contains(&loser));
+
+    project.rem_ok(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+    assert!(
+        project
+            .rem_ok(&["show", &loser])
+            .contains("status: archived")
+    );
+    assert!(project.rem_ok(&["show", &decoy]).contains("status: active"));
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert_git_clean(&project);
+}
+
+#[test]
+fn unmerged_git_conflict_blocks_conflict_resolution_before_writes() {
+    let project = TempProject::new("resolve-unmerged");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nunmerged guard"]));
+    let loser = added_id(&project.rem_ok(&["add", "# Same\nunmerged guard"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    project.create_unmerged_conflict();
+    let head = project.head();
+
+    let error = project.rem_err(&[
+        "conflict",
+        "resolve",
+        &conflict_id,
+        "--keep",
+        &kept,
+        "--accept-external",
+    ]);
+    assert!(error.contains("unmerged Git conflict detected"));
+    assert!(error.contains("conflict.md"));
+    assert_eq!(project.head(), head);
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+    assert!(project.rem_ok(&["show", &loser]).contains("status: active"));
+    assert_eq!(
+        project.git_ok(&["diff", "--name-only", "--diff-filter=U"]),
+        "conflict.md\n"
+    );
+}
+
+#[test]
+fn transaction_lock_blocks_conflict_resolution_before_refresh() {
+    let project = TempProject::new("resolve-transaction-lock");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nlock guard"]));
+    let loser = added_id(&project.rem_ok(&["add", "# Same\nlock guard"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let head = project.head();
+    let lock = project.vault.join(".rem/tx/active.lock");
+    fs::write(&lock, "adversarial-owner\n").unwrap();
+
+    let error = project.rem_err(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+    assert!(error.contains("another rem transaction is active or a stale lock remains"));
+    assert_eq!(project.head(), head);
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+    assert!(project.rem_ok(&["show", &loser]).contains("status: active"));
+    assert!(project.rem_ok(&["conflict", "list"]).contains(&conflict_id));
+
+    fs::remove_file(lock).unwrap();
+    assert_git_clean(&project);
+}
+
+#[test]
 fn unsupported_semantic_relation_rolls_back_transaction() {
     let project = TempProject::new("semantic-relation-rollback");
     project.init_rem("local");
@@ -2489,6 +3353,47 @@ fn concurrent_mutations_never_clobber_a_successful_transaction() {
 
 fn assert_git_clean(project: &TempProject) {
     assert_eq!(project.status_short(), "");
+}
+
+fn added_id(output: &str) -> String {
+    output.split_whitespace().last().unwrap().to_string()
+}
+
+fn conflict_id_for_kind(output: &str, kind: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            (columns.get(1).copied() == Some(kind)).then(|| columns[0].to_string())
+        })
+        .unwrap_or_else(|| panic!("missing conflict kind {kind:?} in output {output:?}"))
+}
+
+fn semantic_fact_id(index_path: &Path, memory_id: &str, object_value: &str) -> String {
+    let conn = rusqlite::Connection::open(index_path).unwrap();
+    conn.query_row(
+        "SELECT id FROM semantic_facts WHERE source_memory_id = ?1 AND object_value = ?2",
+        [memory_id, object_value],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap()
+}
+
+fn semantic_learned_at_rows(index_path: &Path, memory_id: &str) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(index_path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT object_value, learned_at FROM semantic_facts
+             WHERE source_memory_id = ?1 ORDER BY object_value",
+        )
+        .unwrap();
+    statement
+        .query_map([memory_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
 }
 
 fn memory_file_count(vault: &Path) -> usize {

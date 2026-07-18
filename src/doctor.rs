@@ -2,7 +2,7 @@ use std::{fmt, fs, path::Path};
 
 use color_eyre::eyre::Result;
 
-use crate::{config::StorageMode, index, semantic, transaction, workspace::Workspace};
+use crate::{config::StorageMode, conflict, index, semantic, transaction, workspace::Workspace};
 
 #[derive(Clone, Debug)]
 pub struct DoctorFinding {
@@ -70,6 +70,18 @@ pub fn run(workspace: &Workspace, _storage: StorageMode) -> Result<Vec<DoctorFin
                 "semantic cache is unreadable; run `rem rebuild`: {err}"
             ))),
         }
+        match conflict_count(workspace) {
+            Ok(Some(0)) => findings.push(ok("semantic conflicts are clear".to_string())),
+            Ok(Some(conflicts)) => findings.push(warn(format!(
+                "semantic conflicts pending: {conflicts}; run `rem conflict list`"
+            ))),
+            Ok(None) => findings.push(warn(
+                "semantic conflict cache schema missing; run `rem rebuild`".to_string(),
+            )),
+            Err(err) => findings.push(warn(format!(
+                "semantic conflict cache is unreadable; run `rem rebuild`: {err}"
+            ))),
+        }
     } else {
         findings.push(warn("index missing; run `rem rebuild`".to_string()));
     }
@@ -118,6 +130,14 @@ fn semantic_counts(workspace: &Workspace) -> Result<Option<(usize, usize, usize)
         return Ok(None);
     }
     Ok(Some(semantic::fact_counts(&conn)?))
+}
+
+fn conflict_count(workspace: &Workspace) -> Result<Option<usize>> {
+    let conn = rusqlite::Connection::open(workspace.index_path())?;
+    if !conflict::index_has_schema(&conn)? {
+        return Ok(None);
+    }
+    Ok(Some(conflict::query(&conn, None, None)?.len()))
 }
 
 fn check_dir(findings: &mut Vec<DoctorFinding>, path: &Path, label: &str) {

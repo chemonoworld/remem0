@@ -110,7 +110,7 @@ pub fn paint(value: impl fmt::Display, tone: Tone) -> String {
 pub fn row<const N: usize>(cells: [(String, Tone); N]) -> String {
     cells
         .into_iter()
-        .map(|(value, tone)| paint(value, tone))
+        .map(|(value, tone)| paint(single_line_cell(value), tone))
         .collect::<Vec<_>>()
         .join("\t")
 }
@@ -120,6 +120,7 @@ pub fn table_row<const N: usize>(cells: [(String, Tone); N], widths: [usize; N])
         .into_iter()
         .enumerate()
         .map(|(index, (value, tone))| {
+            let value = single_line_cell(value);
             let value = if index + 1 == N {
                 value
             } else {
@@ -129,6 +130,19 @@ pub fn table_row<const N: usize>(cells: [(String, Tone); N], widths: [usize; N])
         })
         .collect::<Vec<_>>()
         .join("  ")
+}
+
+fn single_line_cell(value: String) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 pub fn key_value(key: impl fmt::Display, value: impl fmt::Display, tone: Tone) -> String {
@@ -398,6 +412,14 @@ mod tests {
                 [8, 6, 5],
             ),
             "ID        TYPE    TITLE"
+        );
+    }
+
+    #[test]
+    fn structured_cells_replace_terminal_control_characters() {
+        assert_eq!(
+            single_line_cell("User\tName\nnext\r\u{1b}escape".to_string()),
+            "User Name next  escape"
         );
     }
 }

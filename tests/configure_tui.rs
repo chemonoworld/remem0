@@ -110,6 +110,60 @@ expect eof
         )
         .unwrap();
     }
+
+    fn create_conflict_list_fixture(&self) {
+        let vault = self.root.join("conflict-vault");
+        fs::create_dir_all(vault.join(".rem/cache")).unwrap();
+        fs::create_dir_all(&self.rem_home).unwrap();
+        fs::write(
+            self.rem_home.join("config.toml"),
+            format!(
+                "active_profile = \"test\"\ndefault_search = \"auto\"\n\n[[profiles]]\nname = \"test\"\nroot = {:?}\nstorage = \"local\"\n",
+                vault.display().to_string()
+            ),
+        )
+        .unwrap();
+        let conn = rusqlite::Connection::open(vault.join(".rem/cache/index.sqlite")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE semantic_conflicts (
+               id TEXT PRIMARY KEY,
+               kind TEXT NOT NULL,
+               scope TEXT NOT NULL,
+               subject_id TEXT,
+               subject TEXT,
+               relation TEXT,
+               member_count INTEGER NOT NULL
+             );
+             CREATE TABLE semantic_conflict_members (
+               conflict_id TEXT NOT NULL,
+               ordinal INTEGER NOT NULL,
+               memory_id TEXT NOT NULL,
+               memory_path TEXT NOT NULL,
+               memory_title TEXT NOT NULL,
+               excerpt TEXT NOT NULL,
+               fact_id TEXT,
+               object_id TEXT,
+               object_value TEXT,
+               valid_from TEXT,
+               valid_to TEXT,
+               learned_at TEXT,
+               expired_at TEXT,
+               confidence REAL,
+               line_number INTEGER,
+               PRIMARY KEY (conflict_id, ordinal)
+             );
+             INSERT INTO semantic_conflicts
+               (id, kind, scope, subject_id, subject, relation, member_count)
+             VALUES
+               ('conflict-header-id', 'exact-active-duplicate', 'user', NULL, NULL, NULL, 2);
+             INSERT INTO semantic_conflict_members
+               (conflict_id, ordinal, memory_id, memory_path, memory_title, excerpt)
+             VALUES
+               ('conflict-header-id', 0, 'memory-a', '/vault/a.md', 'A', 'same'),
+               ('conflict-header-id', 1, 'memory-b', '/vault/b.md', 'B', 'same');",
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for TempTuiProject {
@@ -288,4 +342,50 @@ expect eof
             .all(|label| line.contains(label))
     }));
     assert!(!empty.contains("list-header-id"));
+}
+
+#[test]
+fn conflict_list_shows_aligned_headers_for_a_terminal() {
+    if !expect_is_available() {
+        eprintln!("skipping PTY test because expect is not installed");
+        return;
+    }
+
+    let project = TempTuiProject::new("conflict-list-headers");
+    project.create_conflict_list_fixture();
+    let output = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) --color never conflict list
+expect eof
+"#,
+    );
+    assert!(output.status.success());
+    let output = String::from_utf8_lossy(&output.stdout);
+    let header = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("ID"))
+        .unwrap_or_else(|| panic!("missing conflict header in PTY output: {output:?}"));
+    let positions = ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"]
+        .map(|label| header.find(label).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(output.contains("conflict-header-id"));
+    assert!(output.contains("exact-active-duplicate"));
+    assert!(!output.contains('\t'));
+
+    let empty = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) --color never conflict list --scope project
+expect eof
+"#,
+    );
+    assert!(empty.status.success());
+    let empty = String::from_utf8_lossy(&empty.stdout);
+    assert!(empty.lines().any(|line| {
+        ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"]
+            .iter()
+            .all(|label| line.contains(label))
+    }));
+    assert!(!empty.contains("conflict-header-id"));
 }

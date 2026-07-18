@@ -209,6 +209,18 @@ pub fn normalize_relation(value: &str) -> Result<&'static str> {
         })
 }
 
+pub(crate) fn relation_is_exclusive_current(relation: &str) -> bool {
+    relation_specs()
+        .iter()
+        .find(|spec| spec.name == relation)
+        .is_some_and(|spec| {
+            matches!(
+                spec.cardinality,
+                "exclusive-current" | "usually-exclusive-current"
+            )
+        })
+}
+
 pub fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -406,6 +418,10 @@ pub fn extract(memory: &memory::Memory) -> Result<SemanticExtraction> {
 
 pub fn fact_is_current(fact: &SemanticFact) -> Result<bool> {
     let at = now_unix_seconds();
+    semantic_fact_is_valid_at(fact, at)
+}
+
+pub(crate) fn semantic_fact_is_valid_at(fact: &SemanticFact, at: i64) -> Result<bool> {
     if let Some(value) = fact.valid_from.as_deref()
         && temporal_value_to_unix_seconds(value, fact.time_kind)? > at
     {
@@ -422,6 +438,242 @@ pub fn fact_is_current(fact: &SemanticFact) -> Result<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+pub(crate) fn semantic_objects_match(left: &SemanticFact, right: &SemanticFact) -> bool {
+    semantic_object_parts_match(
+        left.object_id.as_deref(),
+        &left.object_value,
+        right.object_id.as_deref(),
+        &right.object_value,
+    )
+}
+
+pub(crate) fn semantic_object_parts_match(
+    left_id: Option<&str>,
+    left_value: &str,
+    right_id: Option<&str>,
+    right_value: &str,
+) -> bool {
+    match (left_id, right_id) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => {
+            canonical_semantic_value(left_value) == canonical_semantic_value(right_value)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn parse_time_to_unix_seconds(value: &str) -> Result<i64> {
+    temporal_unix_seconds(value)
+}
+
+pub(crate) fn expire_facts(
+    memory: &memory::Memory,
+    fact_ids: &BTreeSet<String>,
+    expired_at: i64,
+) -> Result<String> {
+    if fact_ids.is_empty() {
+        return Ok(memory.body.clone());
+    }
+
+    let extraction = extract(memory)?;
+    let facts = extraction
+        .facts
+        .iter()
+        .map(|fact| (fact.id.as_str(), fact))
+        .collect::<BTreeMap<_, _>>();
+    for fact_id in fact_ids {
+        if !facts.contains_key(fact_id.as_str()) {
+            return Err(eyre!(
+                "fact {fact_id} is no longer present in memory {}",
+                memory.metadata.id
+            ));
+        }
+    }
+
+    let mut lines = memory
+        .body
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for fact_id in fact_ids {
+        let fact = facts[fact_id.as_str()];
+        let line_index = fact
+            .line_number
+            .checked_sub(1)
+            .ok_or_else(|| eyre!("fact {fact_id} has invalid line number 0"))?;
+        let line = lines.get_mut(line_index).ok_or_else(|| {
+            eyre!(
+                "fact {fact_id} points outside memory {}",
+                memory.metadata.id
+            )
+        })?;
+        let timestamp = format_unix_seconds(expired_at, fact.time_kind)?;
+        *line = set_fact_option(line, "expired_at", &timestamp)?;
+    }
+
+    for fact in &extraction.facts {
+        let line_index = fact
+            .line_number
+            .checked_sub(1)
+            .ok_or_else(|| eyre!("fact {} has invalid line number 0", fact.id))?;
+        let line = lines.get_mut(line_index).ok_or_else(|| {
+            eyre!(
+                "fact {} points outside memory {}",
+                fact.id,
+                memory.metadata.id
+            )
+        })?;
+        if !fact_line_has_option(line, "learned_at") {
+            *line = set_fact_option(line, "learned_at", &fact.learned_at)?;
+        }
+    }
+
+    let body = lines.join("\n");
+    let mut updated = memory.clone();
+    updated.body.clone_from(&body);
+    let verified = extract(&updated)?;
+    let verified_facts = verified
+        .facts
+        .iter()
+        .map(|fact| (fact.id.as_str(), fact))
+        .collect::<BTreeMap<_, _>>();
+    for fact_id in fact_ids {
+        let fact = verified_facts.get(fact_id.as_str()).ok_or_else(|| {
+            eyre!(
+                "expiring fact {fact_id} changed its identity in memory {}",
+                memory.metadata.id
+            )
+        })?;
+        let actual = fact.expired_at.as_deref().ok_or_else(|| {
+            eyre!(
+                "fact {fact_id} did not retain expired_at in memory {}",
+                memory.metadata.id
+            )
+        })?;
+        if temporal_value_to_unix_seconds(actual, fact.time_kind)? != expired_at {
+            return Err(eyre!(
+                "fact {fact_id} retained an unexpected expiration time {actual:?}"
+            ));
+        }
+    }
+    for fact in &extraction.facts {
+        let verified = verified_facts.get(fact.id.as_str()).ok_or_else(|| {
+            eyre!(
+                "preserving learned_at changed fact {} identity in memory {}",
+                fact.id,
+                memory.metadata.id
+            )
+        })?;
+        if verified.learned_at != fact.learned_at {
+            return Err(eyre!(
+                "fact {} learned_at changed from {:?} to {:?}",
+                fact.id,
+                fact.learned_at,
+                verified.learned_at
+            ));
+        }
+    }
+    Ok(body)
+}
+
+fn fact_line_has_option(line: &str, key: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let Some(raw) = line.strip_prefix("@fact ") else {
+        return false;
+    };
+    raw.split('|').skip(3).any(|option| {
+        option.split_once('=').is_some_and(|(option_key, _)| {
+            option_key
+                .trim()
+                .replace('-', "_")
+                .eq_ignore_ascii_case(key)
+        })
+    })
+}
+
+fn set_fact_option(line: &str, key: &str, value: &str) -> Result<String> {
+    let (line, carriage_return) = line
+        .strip_suffix('\r')
+        .map_or((line, ""), |line| (line, "\r"));
+    let raw = line
+        .strip_prefix("@fact ")
+        .ok_or_else(|| eyre!("semantic fact source line is no longer an @fact directive"))?;
+    let mut parts = raw
+        .split('|')
+        .map(|part| part.trim().to_string())
+        .collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return Err(eyre!("semantic fact source line is malformed"));
+    }
+
+    let mut replaced = false;
+    for option in parts.iter_mut().skip(3) {
+        let Some((option_key, _)) = option.split_once('=') else {
+            continue;
+        };
+        if option_key
+            .trim()
+            .replace('-', "_")
+            .eq_ignore_ascii_case(key)
+        {
+            *option = format!("{key}={value}");
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        parts.push(format!("{key}={value}"));
+    }
+    Ok(format!("@fact {}{carriage_return}", parts.join(" | ")))
+}
+
+fn format_unix_seconds(value: i64, kind: TimeKind) -> Result<String> {
+    match kind {
+        TimeKind::Unix => Ok(value.to_string()),
+        TimeKind::IsoDate => unix_seconds_to_iso(value),
+    }
+}
+
+fn unix_seconds_to_iso(value: i64) -> Result<String> {
+    let days = value.div_euclid(86_400);
+    let seconds = value.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    if !(1..=9_999).contains(&year) {
+        return Err(eyre!(
+            "unix time {value} is outside the supported ISO year range"
+        ));
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn canonical_semantic_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 pub fn insert_extraction(
@@ -936,7 +1188,7 @@ fn short_slug(value: &str) -> String {
     }
 }
 
-fn stable_id(prefix: &str, value: &str) -> String {
+pub(crate) fn stable_id(prefix: &str, value: &str) -> String {
     format!("{prefix}-{}", stable_hash(value))
 }
 
@@ -949,7 +1201,7 @@ fn stable_hash(value: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn excerpt(body: &str) -> String {
+pub(crate) fn excerpt(body: &str) -> String {
     body.lines()
         .filter(|line| !line.trim_start().starts_with("@fact "))
         .map(str::trim)
@@ -975,7 +1227,7 @@ fn parse_confidence(value: Option<&str>) -> Result<Option<f64>> {
     Ok(Some(confidence))
 }
 
-fn now_unix_seconds() -> i64 {
+pub(crate) fn now_unix_seconds() -> i64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -1087,6 +1339,31 @@ mod tests {
         Memory, MemoryKind, MemoryMetadata, MemoryScope, MemoryStatus, MemoryType,
     };
 
+    fn test_memory(id: &str, body: &str) -> Memory {
+        Memory {
+            metadata: MemoryMetadata {
+                id: id.to_string(),
+                memory_type: MemoryType::Long,
+                scope: MemoryScope::User,
+                kind: MemoryKind::Fact,
+                status: MemoryStatus::Active,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                tags: Vec::new(),
+                title: None,
+                source: Some("test".to_string()),
+                source_id: None,
+                agent: None,
+                session: None,
+                confidence: Some("1.0".to_string()),
+                promoted_from: None,
+                supersedes: Vec::new(),
+            },
+            body: body.to_string(),
+            path: None,
+        }
+    }
+
     #[test]
     fn relation_whitelist_normalizes_supported_relations() {
         assert_eq!(normalize_relation("prefers").unwrap(), "PREFERS");
@@ -1158,6 +1435,129 @@ mod tests {
             1_735_732_800
         );
         assert_eq!(temporal_unix_seconds("-1").unwrap(), -1);
+        assert_eq!(unix_seconds_to_iso(-1).unwrap(), "1969-12-31T23:59:59Z");
+        assert_eq!(
+            temporal_unix_seconds(&unix_seconds_to_iso(-1).unwrap()).unwrap(),
+            -1
+        );
+
+        for value in [
+            "0001-01-01T00:00:00Z",
+            "1969-12-31T23:59:59Z",
+            "2000-02-29T12:34:56Z",
+            "9999-12-31T23:59:59Z",
+        ] {
+            assert_eq!(
+                unix_seconds_to_iso(iso_to_unix_seconds(value).unwrap()).unwrap(),
+                value
+            );
+        }
+        assert!(
+            unix_seconds_to_iso(iso_to_unix_seconds("9999-12-31T23:59:59Z").unwrap() + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the supported ISO year range")
+        );
+    }
+
+    #[test]
+    fn expiring_facts_preserves_identity_and_normalizes_each_time_format() {
+        let memory = test_memory(
+            "mixed-time",
+            "# Mixed\n@fact User | PREFERS | Vim | valid_from=1\n@fact User | PREFERS | Helix | valid_from=2024-01-01 | expired_at=2030-01-01",
+        );
+        let before = extract(&memory).unwrap();
+        let fact_ids = before
+            .facts
+            .iter()
+            .map(|fact| fact.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let body = expire_facts(&memory, &fact_ids, 1_735_689_600).unwrap();
+        assert!(body.contains("valid_from=1 | expired_at=1735689600"));
+        assert!(body.contains("valid_from=2024-01-01 | expired_at=2025-01-01T00:00:00Z"));
+        assert_eq!(body.matches("expired_at=").count(), 2);
+        assert_eq!(body.matches("learned_at=1").count(), 2);
+
+        let mut updated = memory;
+        updated.body = body;
+        updated.metadata.updated_at = "999".to_string();
+        let after = extract(&updated).unwrap();
+        assert_eq!(
+            before
+                .facts
+                .iter()
+                .map(|fact| fact.id.as_str())
+                .collect::<Vec<_>>(),
+            after
+                .facts
+                .iter()
+                .map(|fact| fact.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(after.facts.iter().all(|fact| fact.learned_at == "1"));
+    }
+
+    #[test]
+    fn expiring_facts_rejects_missing_facts_and_non_positive_intervals() {
+        let memory = test_memory(
+            "bounded",
+            "# Bounded\n@fact User | PREFERS | Vim | valid_from=2025-01-01",
+        );
+        let fact_id = extract(&memory).unwrap().facts[0].id.clone();
+        let missing = BTreeSet::from(["fact-missing".to_string()]);
+        assert!(
+            expire_facts(&memory, &missing, 1_735_689_600)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer present")
+        );
+
+        let target = BTreeSet::from([fact_id]);
+        let error = expire_facts(&memory, &target, 1_735_689_600)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expired_at must be later than valid_from"));
+    }
+
+    #[test]
+    fn expiring_facts_handles_pre_epoch_times_and_option_aliases() {
+        let memory = test_memory(
+            "pre-epoch",
+            "# Historical\n@fact User | WORKS_AT | OldCo | valid_from=1900-01-01 | learned-at=1901-01-01 | expired-at=2030-01-01\n@fact User | PREFERS | Vim | valid_from=-2 | learned-at=-2",
+        );
+        let before = extract(&memory).unwrap();
+        let fact_ids = before
+            .facts
+            .iter()
+            .map(|fact| fact.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let body = expire_facts(&memory, &fact_ids, -1).unwrap();
+        assert!(body.contains(
+            "valid_from=1900-01-01 | learned-at=1901-01-01 | expired_at=1969-12-31T23:59:59Z"
+        ));
+        assert!(body.contains("valid_from=-2 | learned-at=-2 | expired_at=-1"));
+        assert_eq!(body.matches("expired_at=").count(), 2);
+        assert!(!body.contains("expired-at="));
+        assert!(!body.contains("learned_at="));
+
+        let mut updated = memory;
+        updated.body = body;
+        updated.metadata.updated_at = "999".to_string();
+        let after = extract(&updated).unwrap();
+        assert_eq!(
+            before
+                .facts
+                .iter()
+                .map(|fact| (&fact.id, &fact.learned_at))
+                .collect::<Vec<_>>(),
+            after
+                .facts
+                .iter()
+                .map(|fact| (&fact.id, &fact.learned_at))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

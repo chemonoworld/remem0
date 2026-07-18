@@ -12,8 +12,10 @@ plus local/coding agents.
   the cache inside the same transaction before Git commit.
 - The same SQLite cache also stores a derived temporal semantic graph MVP:
   source episodes, entities, facts, source links, and a small controlled
-  relation ontology. Markdown remains canonical; no external graph database is
-  required.
+  relation ontology. Rebuild also derives deterministic, non-blocking conflict
+  state for exact active duplicates and contradictory current values of
+  exclusive relations. Markdown remains canonical; no external graph database
+  is required.
 - Global config lives under `$HOME/.rem` or `REM_HOME` when set.
 - Each vault stores memories and cache under the configured root.
 
@@ -80,6 +82,8 @@ command help. Existing command names remain available directly, and
 When written directly to a terminal, `rem list` prints an aligned
 `ID / TYPE / SCOPE / KIND / TITLE` header. Redirected output remains the
 headerless, tab-separated format used by scripts.
+`rem conflict list` follows the same contract with
+`ID / KIND / SCOPE / SUBJECT / RELATION / MEMBERS`.
 
 ```sh
 cargo run -- add --short --tag rust $'# Decision\nUse Markdown as canonical memory.'
@@ -97,6 +101,9 @@ cargo run -- search "Markdown"
 cargo run -- search --bm25 "SQLite"
 cargo run -- facts --entity User
 cargo run -- facts --at 2025-04-01
+cargo run -- conflict list
+cargo run -- conflict show <conflict-id-or-prefix>
+cargo run -- conflict resolve <conflict-id-or-prefix> --keep <memory-or-fact-id>
 cargo run -- doctor
 ```
 
@@ -167,10 +174,37 @@ unmerged conflict states, resolve them with Git/editor tooling first and then
 rerun `rem commit --review`.
 
 Git conflict handling and semantic review remain separate. `rem review` covers
-only deterministic fact candidates. Duplicate memory IDs, sync-conflict copies,
-entity resolution, vector/LLM similarity, and automatic temporal validity
-closure remain future semantic-review work; Git unmerged states must still be
-resolved with Git/editor tooling before `rem commit`.
+only deterministic fact candidates. Index rebuilds now populate a derived
+semantic conflict core for same-scope exact active duplicates and same-scope
+exclusive-current fact contradictions; these conflicts do not block commits.
+`rem conflict list` filters that queue with `--kind` and `--scope`, while
+`rem conflict show` prints every memory path, excerpt, fact ID, object, temporal
+window, confidence, and source line needed to make a decision. `conflicts` is a
+visible alias for `conflict`.
+
+Resolution is explicit and transactional:
+
+- For `exact-active-duplicate`, pass the memory ID to retain with `--keep`.
+  Every other active member is moved to `archive/` in one Git commit.
+- For `exclusive-current-conflict`, pass the fact ID whose object should remain
+  current. Facts supporting the same normalized object remain current;
+  competing facts receive `expired_at` writeback in their source Markdown.
+- `--at <time>` selects the expiration instant for semantic facts and defaults
+  to now. Unix and ISO sources may coexist; one instant is rendered in each
+  fact's existing time format. Future instants and non-positive validity
+  intervals are rejected and fully rolled back.
+
+Resolve refreshes the conflict from Markdown after external-change policy has
+run, then requires strict reindexing to prove that the selected conflict is
+gone before Git commit. `--accept-external`, `--restore-external`, and
+`--non-interactive` use the same policy as other mutations. `rem doctor` warns
+with the unresolved conflict count and reports a clear state after resolution.
+Semantic conflicts remain non-blocking for ordinary commits.
+
+Duplicate memory IDs, sync-conflict copies, entity resolution, vector/LLM
+similarity, accepted `keep-both` suppressions, and automatic conflict decisions
+remain future semantic-review work. Git unmerged states must still be resolved
+with Git/editor tooling before `rem commit`.
 
 `rem search` uses the configured `default-search` mode when no explicit search
 flag is provided. Explicit BM25 search requires a current index; run

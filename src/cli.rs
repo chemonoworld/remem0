@@ -9,6 +9,7 @@ use clap::{
 
 use crate::{
     config::StorageMode,
+    conflict::ConflictKind,
     memory::{MemoryKind, MemoryScope, MemoryType},
     output::ColorChoice,
     search::SearchMode,
@@ -49,7 +50,7 @@ const COMMAND_CATEGORIES: &[CommandCategory] = &[
     },
     CommandCategory {
         heading: "Review & Maintenance",
-        commands: &["review", "commit", "rebuild", "doctor"],
+        commands: &["review", "conflict", "commit", "rebuild", "doctor"],
     },
     CommandCategory {
         heading: "Help",
@@ -190,6 +191,14 @@ pub enum Command {
     Search(SearchArgs),
     #[command(about = "List derived temporal semantic facts.")]
     Facts(FactsArgs),
+    #[command(
+        visible_alias = "conflicts",
+        about = "Inspect and resolve derived semantic conflicts."
+    )]
+    Conflict {
+        #[command(subcommand)]
+        command: ConflictCommand,
+    },
     #[command(about = "Rebuild the vault-local SQLite search index.")]
     Rebuild,
     #[command(about = "Inspect configuration, vault, policy, and index state.")]
@@ -504,6 +513,61 @@ pub struct FactsArgs {
     pub all: bool,
     #[arg(long)]
     pub source: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConflictCommand {
+    #[command(about = "List unresolved semantic conflicts from the local index.")]
+    List(ConflictListArgs),
+    #[command(about = "Show conflict evidence by id or unique prefix.")]
+    Show(IdArgs),
+    #[command(about = "Resolve a conflict atomically and commit the Markdown writeback.")]
+    Resolve(ConflictResolveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConflictListArgs {
+    #[arg(long, value_enum)]
+    pub kind: Option<ConflictKindArg>,
+    #[arg(long, value_enum)]
+    pub scope: Option<MemoryScope>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConflictKindArg {
+    #[value(name = "exact-active-duplicate", alias = "duplicate")]
+    ExactActiveDuplicate,
+    #[value(name = "exclusive-current-conflict", alias = "exclusive-current")]
+    ExclusiveCurrent,
+}
+
+impl From<ConflictKindArg> for ConflictKind {
+    fn from(value: ConflictKindArg) -> Self {
+        match value {
+            ConflictKindArg::ExactActiveDuplicate => Self::ExactActiveDuplicate,
+            ConflictKindArg::ExclusiveCurrent => Self::ExclusiveCurrent,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ConflictResolveArgs {
+    #[command(flatten)]
+    pub tx: MutationArgs,
+    pub id: String,
+    #[arg(
+        long,
+        value_name = "MEMORY_OR_FACT_ID",
+        help = "Memory id for a duplicate conflict, or fact id for an exclusive-current conflict."
+    )]
+    pub keep: String,
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        value_name = "TIME",
+        help = "Expiration instant for competing facts (unix seconds or ISO UTC; defaults to now)."
+    )]
+    pub at: Option<String>,
 }
 
 impl SearchArgs {
