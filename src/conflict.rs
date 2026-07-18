@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    path::Path,
+    fmt, fs, io,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -9,9 +9,10 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
+    frontmatter::{self, FieldValue},
     memory::{self, Memory, MemoryScope, MemoryStatus},
     semantic::{self, SemanticExtraction, SemanticFact},
-    workspace::Workspace,
+    workspace::{self, Workspace},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -43,10 +44,58 @@ impl fmt::Display for ConflictKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ConflictStatus {
+    Open,
+    Accepted,
+    Reopened,
+}
+
+impl ConflictStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Accepted => "accepted",
+            Self::Reopened => "reopened",
+        }
+    }
+
+    fn from_label(value: &str) -> Result<Self> {
+        match value {
+            "open" => Ok(Self::Open),
+            "accepted" => Ok(Self::Accepted),
+            "reopened" => Ok(Self::Reopened),
+            other => Err(eyre!("unknown semantic conflict status {other:?}")),
+        }
+    }
+}
+
+impl fmt::Display for ConflictStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConflictAcceptance {
+    pub evidence_hash: String,
+    pub accepted_at: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecisionDiagnostic {
+    pub path: String,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conflict {
     pub id: String,
     pub kind: ConflictKind,
+    pub status: ConflictStatus,
+    pub evidence_hash: String,
+    pub acceptance: Option<ConflictAcceptance>,
     pub scope: MemoryScope,
     pub subject_id: Option<String>,
     pub subject: Option<String>,
@@ -110,6 +159,42 @@ pub(crate) fn detect_at(
     Ok(conflicts)
 }
 
+fn open_conflict(mut conflict: Conflict) -> Conflict {
+    conflict.evidence_hash = evidence_hash(&conflict);
+    conflict
+}
+
+fn evidence_hash(conflict: &Conflict) -> String {
+    let mut evidence = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        conflict.id,
+        conflict.kind,
+        conflict.scope,
+        conflict.subject_id.as_deref().unwrap_or(""),
+        conflict.relation.as_deref().unwrap_or("")
+    );
+    for member in &conflict.members {
+        evidence.push_str(&format!("\nmemory:{}", member.memory_id));
+        if let Some(fact) = &member.fact {
+            evidence.push_str(&format!(
+                "\nfact:{}\nobject-id:{}\nobject:{}\nfrom:{}\nto:{}\nlearned:{}\nexpired:{}\nconfidence:{}\nline:{}",
+                fact.id,
+                fact.object_id.as_deref().unwrap_or(""),
+                fact.object_value,
+                fact.valid_from.as_deref().unwrap_or(""),
+                fact.valid_to.as_deref().unwrap_or(""),
+                fact.learned_at,
+                fact.expired_at.as_deref().unwrap_or(""),
+                fact.confidence
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                fact.line_number
+            ));
+        }
+    }
+    semantic::stable_id("evidence", &evidence)
+}
+
 fn exact_active_duplicates(memories: &[Memory]) -> Vec<Conflict> {
     let mut groups = BTreeMap::<(String, String), BTreeMap<String, &Memory>>::new();
     for memory in memories
@@ -137,18 +222,21 @@ fn exact_active_duplicates(memories: &[Memory]) -> Vec<Conflict> {
                 .into_values()
                 .map(|memory| memory_member(memory, None, semantic::excerpt(&memory.body)))
                 .collect();
-            Some(Conflict {
+            Some(open_conflict(Conflict {
                 id: semantic::stable_id(
                     "conflict",
                     &format!("exact-active-duplicate\n{scope}\n{body}"),
                 ),
                 kind: ConflictKind::ExactActiveDuplicate,
+                status: ConflictStatus::Open,
+                evidence_hash: String::new(),
+                acceptance: None,
                 scope: scope_value,
                 subject_id: None,
                 subject: None,
                 relation: None,
                 members,
-            })
+            }))
         })
         .collect()
 }
@@ -236,7 +324,7 @@ fn exclusive_current_conflicts(
                 )
             })
             .collect();
-        conflicts.push(Conflict {
+        conflicts.push(open_conflict(Conflict {
             id: semantic::stable_id(
                 "conflict",
                 &format!(
@@ -245,12 +333,15 @@ fn exclusive_current_conflicts(
                 ),
             ),
             kind: ConflictKind::ExclusiveCurrent,
+            status: ConflictStatus::Open,
+            evidence_hash: String::new(),
+            acceptance: None,
             scope,
             subject_id: Some(key.subject_id),
             subject: Some(subject),
             relation: Some(key.relation),
             members,
-        });
+        }));
     }
     Ok(conflicts)
 }
@@ -301,6 +392,262 @@ struct FactCandidate<'a> {
     fact: &'a SemanticFact,
 }
 
+pub fn apply_acceptances(
+    workspace: &Workspace,
+    conflicts: &mut [Conflict],
+) -> Result<Vec<DecisionDiagnostic>> {
+    let (acceptances, diagnostics) = load_acceptances(workspace)?;
+    apply_acceptance_map(conflicts, &acceptances);
+    Ok(diagnostics)
+}
+
+fn apply_acceptance_map(
+    conflicts: &mut [Conflict],
+    acceptances: &BTreeMap<String, ConflictAcceptance>,
+) {
+    for conflict in conflicts {
+        let Some(acceptance) = acceptances.get(&conflict.id) else {
+            continue;
+        };
+        conflict.status = if acceptance.evidence_hash == conflict.evidence_hash {
+            ConflictStatus::Accepted
+        } else {
+            ConflictStatus::Reopened
+        };
+        conflict.acceptance = Some(acceptance.clone());
+    }
+}
+
+pub fn accept(
+    workspace: &Workspace,
+    conflict: &Conflict,
+    reason: Option<String>,
+) -> Result<(ConflictAcceptance, bool)> {
+    validate_reason(reason.as_deref())?;
+    if conflict.status == ConflictStatus::Accepted
+        && conflict
+            .acceptance
+            .as_ref()
+            .is_some_and(|acceptance| acceptance.reason == reason)
+    {
+        return Ok((conflict.acceptance.clone().unwrap(), false));
+    }
+
+    workspace::ensure_regular_directory(&workspace.conflicts_dir(), "conflict decision")?;
+    let path = acceptance_path(workspace, &conflict.id)?;
+    ensure_regular_decision_path(&path)?;
+    let acceptance = ConflictAcceptance {
+        evidence_hash: conflict.evidence_hash.clone(),
+        accepted_at: semantic::now_unix_seconds().to_string(),
+        reason,
+    };
+    let raw = render_acceptance(&conflict.id, &acceptance);
+    fs::write(&path, raw)
+        .wrap_err_with(|| format!("failed to write conflict decision {}", path.display()))?;
+    Ok((acceptance, true))
+}
+
+pub fn remove_acceptance(workspace: &Workspace, conflict_id: &str) -> Result<bool> {
+    let path = acceptance_path(workspace, conflict_id)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(eyre!(
+            "conflict decision path {} must be a regular file",
+            path.display()
+        )),
+        Ok(_) => {
+            fs::remove_file(&path).wrap_err_with(|| {
+                format!("failed to remove conflict decision {}", path.display())
+            })?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err)
+            .wrap_err_with(|| format!("failed to inspect conflict decision {}", path.display())),
+    }
+}
+
+fn load_acceptances(
+    workspace: &Workspace,
+) -> Result<(
+    BTreeMap<String, ConflictAcceptance>,
+    Vec<DecisionDiagnostic>,
+)> {
+    let dir = workspace.conflicts_dir();
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(eyre!(
+                "conflict decision path {} must be a regular directory",
+                dir.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok((BTreeMap::new(), Vec::new()));
+        }
+        Err(err) => {
+            return Err(err).wrap_err_with(|| {
+                format!(
+                    "failed to inspect conflict decision directory {}",
+                    dir.display()
+                )
+            });
+        }
+    }
+
+    let mut paths = fs::read_dir(&dir)
+        .wrap_err_with(|| {
+            format!(
+                "failed to read conflict decision directory {}",
+                dir.display()
+            )
+        })?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    paths.sort();
+
+    let mut acceptances = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    for path in paths {
+        if path.extension().is_none_or(|extension| extension != "md") {
+            continue;
+        }
+        let result = (|| {
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(eyre!("conflict decision must be a regular file"));
+            }
+            let raw = fs::read_to_string(&path)?;
+            let (id, acceptance) = parse_acceptance(&path, &raw)?;
+            if acceptances.insert(id.clone(), acceptance).is_some() {
+                return Err(eyre!("duplicate conflict decision for {id}"));
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            diagnostics.push(DecisionDiagnostic {
+                path: path.display().to_string(),
+                message: format!("conflict decision is invalid: {err}"),
+            });
+        }
+    }
+    Ok((acceptances, diagnostics))
+}
+
+fn parse_acceptance(path: &Path, raw: &str) -> Result<(String, ConflictAcceptance)> {
+    let (fields, _) = frontmatter::split_document(raw)?;
+    let allowed = [
+        "conflict_id",
+        "decision",
+        "evidence_hash",
+        "accepted_at",
+        "reason",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if let Some(key) = fields.keys().find(|key| !allowed.contains(key.as_str())) {
+        return Err(eyre!("unknown field {key:?}"));
+    }
+
+    let conflict_id = required_scalar(&fields, "conflict_id")?;
+    validate_stable_id(&conflict_id, "conflict")?;
+    let file_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| eyre!("decision filename must be valid UTF-8"))?;
+    if file_id != conflict_id {
+        return Err(eyre!(
+            "decision filename {file_id:?} does not match conflict_id {conflict_id:?}"
+        ));
+    }
+    let decision = required_scalar(&fields, "decision")?;
+    if decision != "keep-both" {
+        return Err(eyre!("decision must be \"keep-both\""));
+    }
+    let evidence_hash = required_scalar(&fields, "evidence_hash")?;
+    validate_stable_id(&evidence_hash, "evidence")?;
+    let accepted_at = required_scalar(&fields, "accepted_at")?;
+    accepted_at
+        .parse::<i64>()
+        .map_err(|_| eyre!("accepted_at must be signed 64-bit unix seconds"))?;
+    let reason = frontmatter::get_optional_scalar(&fields, "reason")?;
+    validate_reason(reason.as_deref())?;
+    Ok((
+        conflict_id,
+        ConflictAcceptance {
+            evidence_hash,
+            accepted_at,
+            reason,
+        },
+    ))
+}
+
+fn render_acceptance(conflict_id: &str, acceptance: &ConflictAcceptance) -> String {
+    format!(
+        "{}\n# Accepted Conflict\n\nCurrent evidence is intentionally kept.\n",
+        frontmatter::render_frontmatter(&[
+            ("conflict_id", FieldValue::Scalar(conflict_id.to_string())),
+            ("decision", FieldValue::Scalar("keep-both".to_string())),
+            (
+                "evidence_hash",
+                FieldValue::Scalar(acceptance.evidence_hash.clone()),
+            ),
+            (
+                "accepted_at",
+                FieldValue::Scalar(acceptance.accepted_at.clone()),
+            ),
+            (
+                "reason",
+                acceptance
+                    .reason
+                    .clone()
+                    .map(FieldValue::Scalar)
+                    .unwrap_or(FieldValue::Null),
+            ),
+        ])
+        .trim_end()
+    )
+}
+
+fn acceptance_path(workspace: &Workspace, conflict_id: &str) -> Result<PathBuf> {
+    validate_stable_id(conflict_id, "conflict")?;
+    Ok(workspace.conflicts_dir().join(format!("{conflict_id}.md")))
+}
+
+fn ensure_regular_decision_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(eyre!(
+            "conflict decision path {} must be a regular file",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .wrap_err_with(|| format!("failed to inspect conflict decision {}", path.display())),
+    }
+}
+
+fn validate_stable_id(value: &str, prefix: &str) -> Result<()> {
+    let Some(hash) = value.strip_prefix(&format!("{prefix}-")) else {
+        return Err(eyre!("{prefix} id {value:?} has an invalid prefix"));
+    };
+    if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(eyre!("{prefix} id {value:?} must end in 16 hex digits"));
+    }
+    Ok(())
+}
+
+fn required_scalar(fields: &frontmatter::Frontmatter, key: &str) -> Result<String> {
+    frontmatter::get_optional_scalar(fields, key)?
+        .ok_or_else(|| eyre!("missing required field {key:?}"))
+}
+
+fn validate_reason(reason: Option<&str>) -> Result<()> {
+    if reason.is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control)) {
+        return Err(eyre!("acceptance reason must be a non-empty single line"));
+    }
+    Ok(())
+}
+
 pub fn create_schema(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(
@@ -308,6 +655,12 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
 CREATE TABLE semantic_conflicts (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  decision TEXT,
+  accepted_evidence_hash TEXT,
+  accepted_at TEXT,
+  reason TEXT,
   scope TEXT NOT NULL,
   subject_id TEXT,
   subject TEXT,
@@ -340,6 +693,9 @@ CREATE TABLE semantic_conflict_members (
 CREATE INDEX semantic_conflicts_kind_scope_idx
   ON semantic_conflicts(kind, scope);
 
+CREATE INDEX semantic_conflicts_status_idx
+  ON semantic_conflicts(status);
+
 CREATE INDEX semantic_conflict_members_memory_idx
   ON semantic_conflict_members(memory_id);
 "#,
@@ -351,11 +707,27 @@ pub fn insert_conflicts(conn: &Connection, conflicts: &[Conflict]) -> Result<()>
     for conflict in conflicts {
         conn.execute(
             "INSERT INTO semantic_conflicts (
-                id, kind, scope, subject_id, subject, relation, member_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                id, kind, status, evidence_hash, decision, accepted_evidence_hash,
+                accepted_at, reason, scope, subject_id, subject, relation, member_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &conflict.id,
                 conflict.kind.label(),
+                conflict.status.label(),
+                &conflict.evidence_hash,
+                conflict.acceptance.as_ref().map(|_| "keep-both"),
+                conflict
+                    .acceptance
+                    .as_ref()
+                    .map(|acceptance| acceptance.evidence_hash.as_str()),
+                conflict
+                    .acceptance
+                    .as_ref()
+                    .map(|acceptance| acceptance.accepted_at.as_str()),
+                conflict
+                    .acceptance
+                    .as_ref()
+                    .and_then(|acceptance| acceptance.reason.as_deref()),
                 conflict.scope.to_string(),
                 conflict.subject_id.as_deref(),
                 conflict.subject.as_deref(),
@@ -395,16 +767,35 @@ pub fn insert_conflicts(conn: &Connection, conflicts: &[Conflict]) -> Result<()>
 }
 
 pub fn count(conn: &Connection) -> Result<usize> {
-    let count = conn.query_row("SELECT COUNT(*) FROM semantic_conflicts", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM semantic_conflicts WHERE status != 'accepted'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
     Ok(count as usize)
 }
 
 pub fn index_has_schema(conn: &Connection) -> Result<bool> {
     let conflicts = table_exists(conn, "semantic_conflicts")?;
     let members = table_exists(conn, "semantic_conflict_members")?;
-    Ok(conflicts && members)
+    if !conflicts || !members {
+        return Ok(false);
+    }
+
+    let mut statement = conn.prepare("SELECT name FROM pragma_table_info('semantic_conflicts')")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    Ok([
+        "status",
+        "evidence_hash",
+        "decision",
+        "accepted_evidence_hash",
+        "accepted_at",
+        "reason",
+    ]
+    .iter()
+    .all(|column| columns.contains(*column)))
 }
 
 pub fn open_index(index_path: &Path) -> Result<Connection> {
@@ -429,6 +820,23 @@ pub fn query(
     kind: Option<ConflictKind>,
     scope: Option<MemoryScope>,
 ) -> Result<Vec<Conflict>> {
+    query_with_accepted(conn, kind, scope, false)
+}
+
+pub fn query_all(
+    conn: &Connection,
+    kind: Option<ConflictKind>,
+    scope: Option<MemoryScope>,
+) -> Result<Vec<Conflict>> {
+    query_with_accepted(conn, kind, scope, true)
+}
+
+fn query_with_accepted(
+    conn: &Connection,
+    kind: Option<ConflictKind>,
+    scope: Option<MemoryScope>,
+    include_accepted: bool,
+) -> Result<Vec<Conflict>> {
     if !index_has_schema(conn)? {
         return Err(eyre!(
             "semantic conflict cache schema missing; run `rem rebuild`"
@@ -436,26 +844,49 @@ pub fn query(
     }
 
     let mut statement = conn.prepare(
-        "SELECT id, kind, scope, subject_id, subject, relation, member_count
+        "SELECT id, kind, status, evidence_hash, decision, accepted_evidence_hash,
+                accepted_at, reason, scope, subject_id, subject, relation, member_count
          FROM semantic_conflicts
-         ORDER BY kind, scope, subject_id, relation, id",
+         ORDER BY status, kind, scope, subject_id, relation, id",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
-            row.get::<_, i64>(6)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+            row.get::<_, i64>(12)?,
         ))
     })?;
 
     let mut conflicts = Vec::new();
     for row in rows {
-        let (id, kind_label, scope_label, subject_id, subject, relation, member_count) = row?;
+        let (
+            id,
+            kind_label,
+            status_label,
+            evidence_hash,
+            decision,
+            accepted_evidence_hash,
+            accepted_at,
+            reason,
+            scope_label,
+            subject_id,
+            subject,
+            relation,
+            member_count,
+        ) = row?;
         let conflict_kind = ConflictKind::from_label(&kind_label)
+            .wrap_err_with(|| format!("invalid conflict {id}"))?;
+        let conflict_status = ConflictStatus::from_label(&status_label)
             .wrap_err_with(|| format!("invalid conflict {id}"))?;
         let conflict_scope = MemoryScope::from_str(&scope_label)
             .wrap_err_with(|| format!("invalid scope for conflict {id}"))?;
@@ -468,6 +899,49 @@ pub fn query(
             return Err(eyre!(
                 "semantic conflict cache is invalid: conflict {id} has member_count={member_count}; run `rem rebuild`"
             ));
+        }
+
+        validate_stable_id(&evidence_hash, "evidence")
+            .wrap_err_with(|| format!("invalid evidence hash for conflict {id}"))?;
+        let acceptance = match (decision, accepted_evidence_hash, accepted_at, reason) {
+            (None, None, None, None) => None,
+            (Some(decision), Some(evidence_hash), Some(accepted_at), reason)
+                if decision == "keep-both" =>
+            {
+                validate_stable_id(&evidence_hash, "evidence").wrap_err_with(|| {
+                    format!("invalid accepted evidence hash for conflict {id}")
+                })?;
+                accepted_at.parse::<i64>().map_err(|_| {
+                    eyre!(
+                        "semantic conflict cache is invalid: conflict {id} has invalid accepted_at; run `rem rebuild`"
+                    )
+                })?;
+                validate_reason(reason.as_deref()).wrap_err_with(|| {
+                    format!("invalid acceptance reason for conflict {id}; run `rem rebuild`")
+                })?;
+                Some(ConflictAcceptance {
+                    evidence_hash,
+                    accepted_at,
+                    reason,
+                })
+            }
+            _ => {
+                return Err(eyre!(
+                    "semantic conflict cache is invalid: conflict {id} has incomplete acceptance fields; run `rem rebuild`"
+                ));
+            }
+        };
+        match (conflict_status, acceptance.as_ref()) {
+            (ConflictStatus::Open, None) => {}
+            (ConflictStatus::Accepted, Some(acceptance))
+                if acceptance.evidence_hash == evidence_hash => {}
+            (ConflictStatus::Reopened, Some(acceptance))
+                if acceptance.evidence_hash != evidence_hash => {}
+            _ => {
+                return Err(eyre!(
+                    "semantic conflict cache is invalid: conflict {id} status does not match its acceptance; run `rem rebuild`"
+                ));
+            }
         }
 
         let members = load_members(conn, &id)?;
@@ -503,9 +977,15 @@ pub fn query(
                 }
             }
         }
+        if !include_accepted && conflict_status == ConflictStatus::Accepted {
+            continue;
+        }
         conflicts.push(Conflict {
             id,
             kind: conflict_kind,
+            status: conflict_status,
+            evidence_hash,
+            acceptance,
             scope: conflict_scope,
             subject_id,
             subject,
@@ -520,7 +1000,7 @@ pub fn find(conn: &Connection, id_or_prefix: &str) -> Result<Conflict> {
     if id_or_prefix.trim().is_empty() {
         return Err(eyre!("conflict id or prefix cannot be empty"));
     }
-    let conflicts = query(conn, None, None)?;
+    let conflicts = query_all(conn, None, None)?;
     if let Some(conflict) = conflicts
         .iter()
         .find(|conflict| conflict.id == id_or_prefix)
@@ -541,7 +1021,7 @@ pub fn find(conn: &Connection, id_or_prefix: &str) -> Result<Conflict> {
 }
 
 pub fn find_exact(conn: &Connection, id: &str) -> Result<Option<Conflict>> {
-    Ok(query(conn, None, None)?
+    Ok(query_all(conn, None, None)?
         .into_iter()
         .find(|conflict| conflict.id == id))
 }
@@ -803,12 +1283,17 @@ fn select_member_id(candidates: &[&str], selector: &str, label: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
     use rusqlite::Connection;
 
     use super::{
-        ConflictKind, create_schema, detect_at, find, insert_conflicts, query, select_member_id,
+        ConflictAcceptance, ConflictKind, ConflictStatus, apply_acceptance_map, create_schema,
+        detect_at, find, index_has_schema, insert_conflicts, parse_acceptance, query, query_all,
+        render_acceptance, select_member_id, validate_reason,
     };
     use crate::{
         memory::{Memory, MemoryKind, MemoryMetadata, MemoryScope, MemoryStatus, MemoryType},
@@ -894,6 +1379,8 @@ mod tests {
             ["a", "b"]
         );
         assert!(conflicts[0].id.starts_with("conflict-"));
+        assert_eq!(conflicts[0].status, ConflictStatus::Open);
+        assert!(conflicts[0].evidence_hash.starts_with("evidence-"));
 
         let reversed = memories.into_iter().rev().collect::<Vec<_>>();
         assert_eq!(
@@ -951,6 +1438,82 @@ mod tests {
         assert_eq!(expanded_conflicts.len(), 1);
         assert_eq!(expanded_conflicts[0].id, conflict.id);
         assert_eq!(expanded_conflicts[0].members.len(), 3);
+        assert_ne!(expanded_conflicts[0].evidence_hash, conflict.evidence_hash);
+    }
+
+    #[test]
+    fn acceptance_matches_exact_evidence_and_reopens_after_change() {
+        let memories = vec![
+            memory(
+                "a",
+                MemoryScope::User,
+                MemoryStatus::Active,
+                "# A\n@fact User | PREFERS | Vim | valid_from=1",
+            ),
+            memory(
+                "b",
+                MemoryScope::User,
+                MemoryStatus::Active,
+                "# B\n@fact User | PREFERS | Helix | valid_from=1",
+            ),
+        ];
+        let mut conflicts = detect_at(&memories, &extractions(&memories), 100).unwrap();
+        let conflict_id = conflicts[0].id.clone();
+        let accepted = ConflictAcceptance {
+            evidence_hash: conflicts[0].evidence_hash.clone(),
+            accepted_at: "100".to_string(),
+            reason: Some("intentional alternatives".to_string()),
+        };
+        apply_acceptance_map(
+            &mut conflicts,
+            &BTreeMap::from([(conflict_id.clone(), accepted.clone())]),
+        );
+        assert_eq!(conflicts[0].status, ConflictStatus::Accepted);
+        assert_eq!(conflicts[0].acceptance.as_ref(), Some(&accepted));
+
+        let mut changed = conflicts.clone();
+        let stale = ConflictAcceptance {
+            evidence_hash: "evidence-0000000000000000".to_string(),
+            ..accepted
+        };
+        apply_acceptance_map(
+            &mut changed,
+            &BTreeMap::from([(conflict_id, stale.clone())]),
+        );
+        assert_eq!(changed[0].status, ConflictStatus::Reopened);
+        assert_eq!(changed[0].acceptance.as_ref(), Some(&stale));
+    }
+
+    #[test]
+    fn acceptance_markdown_round_trips_strictly() {
+        let conflict_id = "conflict-0123456789abcdef";
+        let path = Path::new("conflict-0123456789abcdef.md");
+        let acceptance = ConflictAcceptance {
+            evidence_hash: "evidence-fedcba9876543210".to_string(),
+            accepted_at: "100".to_string(),
+            reason: Some("both remain valid".to_string()),
+        };
+        let raw = render_acceptance(conflict_id, &acceptance);
+
+        assert_eq!(
+            parse_acceptance(path, &raw).unwrap(),
+            (conflict_id.to_string(), acceptance)
+        );
+        assert!(
+            parse_acceptance(Path::new("conflict-1111111111111111.md"), &raw)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match")
+        );
+        let unknown = raw.replacen("---\n", "---\nextra: rejected\n", 1);
+        assert!(
+            parse_acceptance(path, &unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
+        assert!(validate_reason(Some("line\nfeed")).is_err());
+        assert!(validate_reason(Some("escape\u{1b}")).is_err());
     }
 
     #[test]
@@ -1199,6 +1762,74 @@ mod tests {
         .unwrap();
         let error = query(&conn, None, None).unwrap_err().to_string();
         assert!(error.contains("declares 3 members but stores 2"));
+    }
+
+    #[test]
+    fn accepted_rows_are_hidden_by_default_but_remain_queryable() {
+        let memories = vec![
+            memory(
+                "a",
+                MemoryScope::User,
+                MemoryStatus::Active,
+                "# A\n@fact User | PREFERS | Vim | valid_from=1",
+            ),
+            memory(
+                "b",
+                MemoryScope::User,
+                MemoryStatus::Active,
+                "# B\n@fact User | PREFERS | Helix | valid_from=1",
+            ),
+        ];
+        let mut conflicts = detect_at(&memories, &extractions(&memories), 100).unwrap();
+        conflicts[0].status = ConflictStatus::Accepted;
+        conflicts[0].acceptance = Some(ConflictAcceptance {
+            evidence_hash: conflicts[0].evidence_hash.clone(),
+            accepted_at: "100".to_string(),
+            reason: None,
+        });
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (id TEXT PRIMARY KEY);
+             CREATE TABLE semantic_facts (id TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+        create_schema(&conn).unwrap();
+        for member in &conflicts[0].members {
+            conn.execute(
+                "INSERT OR IGNORE INTO memories (id) VALUES (?1)",
+                [&member.memory_id],
+            )
+            .unwrap();
+            let fact_id = &member.fact.as_ref().unwrap().id;
+            conn.execute(
+                "INSERT OR IGNORE INTO semantic_facts (id) VALUES (?1)",
+                [fact_id],
+            )
+            .unwrap();
+        }
+        insert_conflicts(&conn, &conflicts).unwrap();
+
+        assert!(query(&conn, None, None).unwrap().is_empty());
+        assert_eq!(query_all(&conn, None, None).unwrap(), conflicts);
+        assert_eq!(super::count(&conn).unwrap(), 0);
+        assert_eq!(find(&conn, "conflict-").unwrap(), conflicts[0]);
+    }
+
+    #[test]
+    fn legacy_conflict_cache_requires_rebuild() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE semantic_conflicts (
+                 id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL
+             );
+             CREATE TABLE semantic_conflict_members (
+                 conflict_id TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        assert!(!index_has_schema(&conn).unwrap());
     }
 
     #[test]

@@ -517,10 +517,12 @@ pub struct FactsArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConflictCommand {
-    #[command(about = "List unresolved semantic conflicts from the local index.")]
+    #[command(about = "List semantic conflicts from the local index.")]
     List(ConflictListArgs),
     #[command(about = "Show conflict evidence by id or unique prefix.")]
     Show(IdArgs),
+    #[command(about = "Accept the current conflict evidence as intentional.")]
+    Accept(ConflictAcceptArgs),
     #[command(about = "Resolve a conflict atomically and commit the Markdown writeback.")]
     Resolve(ConflictResolveArgs),
 }
@@ -531,6 +533,8 @@ pub struct ConflictListArgs {
     pub kind: Option<ConflictKindArg>,
     #[arg(long, value_enum)]
     pub scope: Option<MemoryScope>,
+    #[arg(long, help = "Include accepted conflicts.")]
+    pub all: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -548,6 +552,15 @@ impl From<ConflictKindArg> for ConflictKind {
             ConflictKindArg::ExclusiveCurrent => Self::ExclusiveCurrent,
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct ConflictAcceptArgs {
+    #[command(flatten)]
+    pub tx: MutationArgs,
+    pub id: String,
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]

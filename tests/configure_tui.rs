@@ -128,6 +128,12 @@ expect eof
             "CREATE TABLE semantic_conflicts (
                id TEXT PRIMARY KEY,
                kind TEXT NOT NULL,
+               status TEXT NOT NULL,
+               evidence_hash TEXT NOT NULL,
+               decision TEXT,
+               accepted_evidence_hash TEXT,
+               accepted_at TEXT,
+               reason TEXT,
                scope TEXT NOT NULL,
                subject_id TEXT,
                subject TEXT,
@@ -153,9 +159,12 @@ expect eof
                PRIMARY KEY (conflict_id, ordinal)
              );
              INSERT INTO semantic_conflicts
-               (id, kind, scope, subject_id, subject, relation, member_count)
+               (id, kind, status, evidence_hash, decision, accepted_evidence_hash,
+                accepted_at, reason, scope, subject_id, subject, relation, member_count)
              VALUES
-               ('conflict-header-id', 'exact-active-duplicate', 'user', NULL, NULL, NULL, 2);
+               ('conflict-header-id', 'exact-active-duplicate', 'open',
+                'evidence-0000000000000000', NULL, NULL, NULL, NULL,
+                'user', NULL, NULL, NULL, 2);
              INSERT INTO semantic_conflict_members
                (conflict_id, ordinal, memory_id, memory_path, memory_title, excerpt)
              VALUES
@@ -366,8 +375,10 @@ expect eof
         .lines()
         .find(|line| line.trim_start().starts_with("ID"))
         .unwrap_or_else(|| panic!("missing conflict header in PTY output: {output:?}"));
-    let positions = ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"]
-        .map(|label| header.find(label).unwrap());
+    let positions = [
+        "ID", "STATUS", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS",
+    ]
+    .map(|label| header.find(label).unwrap());
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(output.contains("conflict-header-id"));
     assert!(output.contains("exact-active-duplicate"));
@@ -383,9 +394,11 @@ expect eof
     assert!(empty.status.success());
     let empty = String::from_utf8_lossy(&empty.stdout);
     assert!(empty.lines().any(|line| {
-        ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"]
-            .iter()
-            .all(|label| line.contains(label))
+        [
+            "ID", "STATUS", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS",
+        ]
+        .iter()
+        .all(|label| line.contains(label))
     }));
     assert!(!empty.contains("conflict-header-id"));
 }

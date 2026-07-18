@@ -43,6 +43,10 @@ impl Workspace {
         self.root.join("archive")
     }
 
+    pub fn conflicts_dir(&self) -> PathBuf {
+        self.root.join("conflicts")
+    }
+
     pub fn rem_dir(&self) -> PathBuf {
         self.root.join(".rem")
     }
@@ -67,6 +71,7 @@ impl Workspace {
             self.policies_dir(),
             self.inbox_dir(),
             self.archive_dir(),
+            self.conflicts_dir(),
             self.rem_dir(),
             self.cache_dir(),
             self.tx_dir(),

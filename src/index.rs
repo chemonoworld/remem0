@@ -151,7 +151,11 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
         }
     }
     semantic::validate_no_duplicate_fact_ids(&conn)?;
-    let conflicts = conflict::detect_current(&indexed_memories, &extractions)?;
+    let mut conflicts = conflict::detect_current(&indexed_memories, &extractions)?;
+    for diagnostic in conflict::apply_acceptances(workspace, &mut conflicts)? {
+        diagnostics += 1;
+        insert_diagnostic(&conn, diagnostic.path, "error", diagnostic.message)?;
+    }
     conflict::insert_conflicts(&conn, &conflicts)?;
     let (semantic_entities, semantic_episodes, semantic_facts) = semantic::fact_counts(&conn)?;
     let semantic_conflicts = conflict::count(&conn)?;

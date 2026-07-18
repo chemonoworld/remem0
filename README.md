@@ -27,6 +27,7 @@ plus local/coding agents.
   policies/
   inbox/
   archive/
+  conflicts/       # tracked conflict decisions
   .rem/
     cache/
     tx/
@@ -83,7 +84,7 @@ When written directly to a terminal, `rem list` prints an aligned
 `ID / TYPE / SCOPE / KIND / TITLE` header. Redirected output remains the
 headerless, tab-separated format used by scripts.
 `rem conflict list` follows the same contract with
-`ID / KIND / SCOPE / SUBJECT / RELATION / MEMBERS`.
+`ID / STATUS / KIND / SCOPE / SUBJECT / RELATION / MEMBERS`.
 
 ```sh
 cargo run -- add --short --tag rust $'# Decision\nUse Markdown as canonical memory.'
@@ -103,6 +104,7 @@ cargo run -- facts --entity User
 cargo run -- facts --at 2025-04-01
 cargo run -- conflict list
 cargo run -- conflict show <conflict-id-or-prefix>
+cargo run -- conflict accept <conflict-id-or-prefix> --reason "intentional alternatives"
 cargo run -- conflict resolve <conflict-id-or-prefix> --keep <memory-or-fact-id>
 cargo run -- doctor
 ```
@@ -182,6 +184,13 @@ exclusive-current fact contradictions; these conflicts do not block commits.
 window, confidence, and source line needed to make a decision. `conflicts` is a
 visible alias for `conflict`.
 
+`rem conflict accept <id>` records an intentional keep-both decision in tracked
+`conflicts/<id>.md`. Accepted conflicts are hidden from the default list and
+visible with `conflict list --all`. The decision is tied to an exact evidence
+hash: changed members or facts automatically reopen the same conflict. Running
+`accept` again accepts the new evidence; resolving the conflict removes the
+decision file.
+
 Resolution is explicit and transactional:
 
 - For `exact-active-duplicate`, pass the memory ID to retain with `--keep`.
@@ -202,9 +211,9 @@ with the unresolved conflict count and reports a clear state after resolution.
 Semantic conflicts remain non-blocking for ordinary commits.
 
 Duplicate memory IDs, sync-conflict copies, entity resolution, vector/LLM
-similarity, accepted `keep-both` suppressions, and automatic conflict decisions
-remain future semantic-review work. Git unmerged states must still be resolved
-with Git/editor tooling before `rem commit`.
+similarity, and automatic conflict decisions remain future semantic-review
+work. Git unmerged states must still be resolved with Git/editor tooling before
+`rem commit`.
 
 `rem search` uses the configured `default-search` mode when no explicit search
 flag is provided. Explicit BM25 search requires a current index; run

@@ -1577,6 +1577,328 @@ fn conflict_list_show_filters_alias_and_doctor_are_actionable() {
 }
 
 #[test]
+fn accepted_conflict_is_hidden_and_reopens_when_evidence_changes() {
+    let project = TempProject::new("conflict-accept-reopen");
+    project.init_rem("local");
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Editor A\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Editor B\n@fact User | PREFERS | Helix | valid_from=2021-01-01",
+    ]);
+    let listed = project.rem_ok(&["conflict", "list"]);
+    let conflict_id = conflict_id_for_kind(&listed, "exclusive-current-conflict");
+    assert!(listed.contains(&format!("{conflict_id}\topen\t")));
+
+    let head = project.head();
+    let invalid_reason =
+        project.rem_err(&["conflict", "accept", &conflict_id, "--reason", "two\nlines"]);
+    assert!(invalid_reason.contains("reason must be a non-empty single line"));
+    assert_eq!(project.head(), head);
+
+    let accepted = project.rem_ok(&[
+        "conflict",
+        "accept",
+        &conflict_id,
+        "--reason",
+        "both are intentional",
+    ]);
+    assert!(accepted.contains(&format!("accepted {conflict_id}")));
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: accept conflict {conflict_id}")
+    );
+    let decision_path = project
+        .vault
+        .join("conflicts")
+        .join(format!("{conflict_id}.md"));
+    let decision = fs::read_to_string(&decision_path).unwrap();
+    assert!(decision.contains(&format!("conflict_id: {conflict_id}")));
+    assert!(decision.contains("decision: keep-both"));
+    assert!(decision.contains("reason: both are intentional"));
+    assert!(
+        project
+            .tracked_files()
+            .contains(&format!("conflicts/{conflict_id}.md"))
+    );
+
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    let all = project.rem_ok(&["conflict", "list", "--all"]);
+    assert!(all.contains(&format!("{conflict_id}\taccepted\t")));
+    let shown = project.rem_ok(&["conflict", "show", &conflict_id]);
+    assert!(shown.contains("status: accepted"));
+    assert!(shown.contains("decision: keep-both"));
+    assert!(shown.contains("reason: both are intentional"));
+    let evidence = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("evidence_hash: "))
+        .unwrap();
+    let accepted_evidence = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("accepted_evidence_hash: "))
+        .unwrap();
+    assert_eq!(evidence, accepted_evidence);
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts are clear")
+    );
+    project.rem_ok(&["rebuild"]);
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Editor C\n@fact User | PREFERS | Emacs | valid_from=2022-01-01",
+    ]);
+    let reopened = project.rem_ok(&["conflict", "list"]);
+    assert!(reopened.contains(&format!("{conflict_id}\treopened\t")));
+    let shown = project.rem_ok(&["conflict", "show", &conflict_id]);
+    assert!(shown.contains("status: reopened"));
+    let evidence = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("evidence_hash: "))
+        .unwrap();
+    let accepted_evidence = shown
+        .lines()
+        .find_map(|line| line.strip_prefix("accepted_evidence_hash: "))
+        .unwrap();
+    assert_ne!(evidence, accepted_evidence);
+    assert!(shown.contains("reason: both are intentional"));
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("semantic conflicts pending: 1")
+    );
+
+    project.rem_ok(&[
+        "conflict",
+        "accept",
+        &conflict_id,
+        "--reason",
+        "both are intentional",
+    ]);
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert!(
+        project
+            .rem_ok(&["conflict", "list", "--all"])
+            .contains(&format!("{conflict_id}\taccepted\t"))
+    );
+    let head = project.head();
+    let no_op = project.rem_ok(&[
+        "conflict",
+        "accept",
+        &conflict_id,
+        "--reason",
+        "both are intentional",
+    ]);
+    assert!(no_op.contains(&format!("no-op {conflict_id}")));
+    assert_eq!(project.head(), head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn resolving_an_accepted_conflict_removes_its_decision() {
+    let project = TempProject::new("resolve-accepted-conflict");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nintentional duplicate"]));
+    let archived = added_id(&project.rem_ok(&["add", "# Same\nintentional duplicate"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    project.rem_ok(&["conflict", "accept", &conflict_id]);
+    let decision_path = project
+        .vault
+        .join("conflicts")
+        .join(format!("{conflict_id}.md"));
+    assert!(decision_path.is_file());
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+
+    project.rem_ok(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+
+    assert!(!decision_path.exists());
+    assert!(project.rem_ok(&["conflict", "list", "--all"]).is_empty());
+    assert!(
+        project
+            .rem_ok(&["show", &archived])
+            .contains("status: archived")
+    );
+    assert!(
+        !project
+            .tracked_files()
+            .contains(&format!("conflicts/{conflict_id}.md"))
+    );
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn acceptance_commit_failure_rolls_back_decision_and_index() {
+    let project = TempProject::new("accept-rollback");
+    project.init_rem("local");
+    project.rem_ok(&["add", "# Same\nrollback acceptance"]);
+    project.rem_ok(&["add", "# Same\nrollback acceptance"]);
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let decision_path = project
+        .vault
+        .join("conflicts")
+        .join(format!("{conflict_id}.md"));
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let index_before = fs::read(&index_path).unwrap();
+    let head = project.head();
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let error = project.rem_err(&["conflict", "accept", &conflict_id]);
+    assert!(error.contains("git commit failed"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert!(!decision_path.exists());
+    assert!(
+        project
+            .rem_ok(&["conflict", "list"])
+            .contains(&format!("{conflict_id}\topen\t"))
+    );
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn accepted_resolution_failure_restores_decision_markdown_and_index() {
+    let project = TempProject::new("accepted-resolve-rollback");
+    project.init_rem("local");
+    let kept = added_id(&project.rem_ok(&["add", "# Same\nresolve rollback"]));
+    let other = added_id(&project.rem_ok(&["add", "# Same\nresolve rollback"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    project.rem_ok(&["conflict", "accept", &conflict_id, "--reason", "keep both"]);
+    let decision_path = project
+        .vault
+        .join("conflicts")
+        .join(format!("{conflict_id}.md"));
+    let decision_before = fs::read(&decision_path).unwrap();
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let index_before = fs::read(&index_path).unwrap();
+    let head = project.head();
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let error = project.rem_err(&["conflict", "resolve", &conflict_id, "--keep", &kept]);
+    assert!(error.contains("git commit failed"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert_eq!(fs::read(&decision_path).unwrap(), decision_before);
+    assert!(project.rem_ok(&["conflict", "list"]).is_empty());
+    assert!(
+        project
+            .rem_ok(&["conflict", "list", "--all"])
+            .contains(&format!("{conflict_id}\taccepted\t"))
+    );
+    assert!(project.rem_ok(&["show", &kept]).contains("status: active"));
+    assert!(project.rem_ok(&["show", &other]).contains("status: active"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn conflict_accept_refreshes_external_edits_before_writing_decision() {
+    let project = TempProject::new("accept-stale-external");
+    project.init_rem("local");
+    project.rem_ok(&["add", "# Same\nstale acceptance"]);
+    let changed = added_id(&project.rem_ok(&["add", "# Same\nstale acceptance"]));
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let changed_path = project
+        .vault
+        .join("memories/short")
+        .join(format!("{changed}.md"));
+    let raw = fs::read_to_string(&changed_path).unwrap();
+    fs::write(
+        &changed_path,
+        raw.replace("# Same\nstale acceptance", "# Unique\nexternal edit"),
+    )
+    .unwrap();
+    let head = project.head();
+
+    let error = project.rem_err(&["conflict", "accept", &conflict_id, "--accept-external"]);
+    assert!(error.contains("no semantic conflict found"));
+    assert_eq!(project.head(), head);
+    assert!(
+        fs::read_to_string(&changed_path)
+            .unwrap()
+            .contains("# Unique\nexternal edit")
+    );
+    assert!(
+        !project
+            .vault
+            .join("conflicts")
+            .join(format!("{conflict_id}.md"))
+            .exists()
+    );
+    assert!(project.status_short().contains(&format!("{changed}.md")));
+}
+
+#[test]
+fn malformed_external_conflict_decision_blocks_commit_without_replacing_index() {
+    let project = TempProject::new("invalid-conflict-decision");
+    project.init_rem("local");
+    project.rem_ok(&["add", "# Same\ninvalid decision"]);
+    project.rem_ok(&["add", "# Same\ninvalid decision"]);
+    let conflict_id = conflict_id_for_kind(
+        &project.rem_ok(&["conflict", "list"]),
+        "exact-active-duplicate",
+    );
+    let decision_path = project
+        .vault
+        .join("conflicts")
+        .join(format!("{conflict_id}.md"));
+    fs::write(
+        &decision_path,
+        format!(
+            "---\nconflict_id: {conflict_id}\ndecision: invalid\nevidence_hash: evidence-0000000000000000\naccepted_at: 1\nreason: null\n---\n"
+        ),
+    )
+    .unwrap();
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let index_before = fs::read(&index_path).unwrap();
+    let head = project.head();
+
+    let error = project.rem_err(&["commit", "--accept-external", "--non-interactive"]);
+    assert!(error.contains("reindex produced 1 diagnostics"));
+    assert!(error.contains("conflict decision is invalid"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert!(decision_path.is_file());
+    assert!(project.status_short().contains("?? conflicts/"));
+
+    fs::remove_file(decision_path).unwrap();
+    project.rem_ok(&["rebuild"]);
+    assert!(
+        project
+            .rem_ok(&["conflict", "list"])
+            .contains(&format!("{conflict_id}\topen\t"))
+    );
+    assert_git_clean(&project);
+}
+
+#[test]
 fn resolving_duplicate_conflict_archives_every_loser_in_one_commit() {
     let project = TempProject::new("resolve-duplicate");
     project.init_rem("local");
@@ -2061,8 +2383,8 @@ fn conflict_list_keeps_control_characters_inside_one_tsv_cell() {
 
     let listed = project.rem_ok(&["conflict", "list"]);
     let columns = listed.trim_end().split('\t').collect::<Vec<_>>();
-    assert_eq!(columns.len(), 6, "unexpected TSV output: {listed:?}");
-    assert_eq!(columns[3], "User Name");
+    assert_eq!(columns.len(), 7, "unexpected TSV output: {listed:?}");
+    assert_eq!(columns[4], "User Name");
     assert!(!listed.contains('\r'));
     assert_git_clean(&project);
 }
@@ -2082,9 +2404,11 @@ fn conflict_resolution_rejects_cache_only_conflict_ids() {
     let conn = rusqlite::Connection::open(&index_path).unwrap();
     conn.execute(
         "INSERT INTO semantic_conflicts (
-             id, kind, scope, subject_id, subject, relation, member_count
+             id, kind, status, evidence_hash, decision, accepted_evidence_hash,
+             accepted_at, reason, scope, subject_id, subject, relation, member_count
          )
-         SELECT ?1, kind, scope, subject_id, subject, relation, member_count
+         SELECT ?1, kind, status, evidence_hash, decision, accepted_evidence_hash,
+                accepted_at, reason, scope, subject_id, subject, relation, member_count
          FROM semantic_conflicts WHERE id = ?2",
         [fake_id, &real_id],
     )
@@ -3364,7 +3688,7 @@ fn conflict_id_for_kind(output: &str, kind: &str) -> String {
         .lines()
         .find_map(|line| {
             let columns = line.split('\t').collect::<Vec<_>>();
-            (columns.get(1).copied() == Some(kind)).then(|| columns[0].to_string())
+            (columns.get(2).copied() == Some(kind)).then(|| columns[0].to_string())
         })
         .unwrap_or_else(|| panic!("missing conflict kind {kind:?} in output {output:?}"))
 }

@@ -560,12 +560,22 @@ fn run_conflict_command(store: &ConfigStore, command: ConflictCommand) -> Result
     match command {
         ConflictCommand::List(args) => {
             let conn = conflict::open_index(&workspace.index_path())?;
-            let conflicts = conflict::query(&conn, args.kind.map(Into::into), args.scope)?;
+            let conflicts = if args.all {
+                conflict::query_all(&conn, args.kind.map(Into::into), args.scope)?
+            } else {
+                conflict::query(&conn, args.kind.map(Into::into), args.scope)?
+            };
             let rows = conflicts
                 .into_iter()
                 .map(|conflict| {
+                    let status_tone = match conflict.status {
+                        conflict::ConflictStatus::Open => Tone::Info,
+                        conflict::ConflictStatus::Accepted => Tone::Success,
+                        conflict::ConflictStatus::Reopened => Tone::Warning,
+                    };
                     [
                         (conflict.id, Tone::Id),
+                        (conflict.status.to_string(), status_tone),
                         (conflict.kind.to_string(), Tone::Kind),
                         (conflict.scope.to_string(), Tone::Scope),
                         (
@@ -581,7 +591,9 @@ fn run_conflict_command(store: &ConfigStore, command: ConflictCommand) -> Result
                 })
                 .collect::<Vec<_>>();
             if output::stdout_is_terminal() {
-                let headers = ["ID", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS"];
+                let headers = [
+                    "ID", "STATUS", "KIND", "SCOPE", "SUBJECT", "RELATION", "MEMBERS",
+                ];
                 let widths = std::array::from_fn(|index| {
                     rows.iter()
                         .map(|row| row[index].0.chars().count())
@@ -609,6 +621,7 @@ fn run_conflict_command(store: &ConfigStore, command: ConflictCommand) -> Result
             print_conflict(&conflict);
             Ok(())
         }
+        ConflictCommand::Accept(args) => run_conflict_accept(&workspace, args),
         ConflictCommand::Resolve(args) => run_conflict_resolve(&workspace, args),
     }
 }
@@ -616,6 +629,12 @@ fn run_conflict_command(store: &ConfigStore, command: ConflictCommand) -> Result
 fn print_conflict(conflict: &conflict::Conflict) {
     output::line(output::colon_value("id", &conflict.id, Tone::Id));
     output::line(output::colon_value("kind", conflict.kind, Tone::Kind));
+    output::line(output::colon_value("status", conflict.status, Tone::Info));
+    output::line(output::colon_value(
+        "evidence_hash",
+        &conflict.evidence_hash,
+        Tone::Id,
+    ));
     output::line(output::colon_value("scope", conflict.scope, Tone::Scope));
     output::line(output::colon_value(
         "subject_id",
@@ -637,6 +656,24 @@ fn print_conflict(conflict: &conflict::Conflict) {
         conflict.members.len(),
         Tone::Number,
     ));
+    if let Some(acceptance) = &conflict.acceptance {
+        output::line(output::colon_value("decision", "keep-both", Tone::Success));
+        output::line(output::colon_value(
+            "accepted_evidence_hash",
+            &acceptance.evidence_hash,
+            Tone::Id,
+        ));
+        output::line(output::colon_value(
+            "accepted_at",
+            &acceptance.accepted_at,
+            Tone::Muted,
+        ));
+        output::line(output::colon_value(
+            "reason",
+            acceptance.reason.as_deref().unwrap_or("-"),
+            Tone::Muted,
+        ));
+    }
     for (index, member) in conflict.members.iter().enumerate() {
         output::line("");
         output::line(output::colon_value("member", index + 1, Tone::Number));
@@ -700,6 +737,52 @@ fn print_conflict(conflict: &conflict::Conflict) {
     }
 }
 
+fn run_conflict_accept(workspace: &Workspace, args: cli::ConflictAcceptArgs) -> Result<()> {
+    let requested_id = args.id;
+    let apply_id = requested_id.clone();
+    let validate_id = requested_id;
+    let reason = args.reason;
+    let options = transaction_options(args.tx)?;
+    let ((conflict_id, changed), outcome) = transaction::run_mutation_with_message_checked(
+        workspace,
+        options,
+        || {
+            let current = refreshed_conflict(workspace, &apply_id)?;
+            let (_, changed) = conflict::accept(workspace, &current, reason)?;
+            let message = format!("rem: accept conflict {}", current.id);
+            Ok(((current.id, changed), message))
+        },
+        |_| {
+            let conn = conflict::open_index(&workspace.index_path())?;
+            let accepted = conflict::find(&conn, &validate_id)?;
+            if accepted.status != conflict::ConflictStatus::Accepted {
+                return Err(eyre!(
+                    "conflict {} was not accepted after reindex; rolled back without committing",
+                    accepted.id
+                ));
+            }
+            Ok(())
+        },
+    )?;
+
+    output::line(format!(
+        "{} {}",
+        output::paint(
+            if changed { "accepted" } else { "no-op" },
+            if changed {
+                Tone::Success
+            } else {
+                Tone::Warning
+            }
+        ),
+        output::paint(conflict_id, Tone::Id)
+    ));
+    if let Some(commit_id) = outcome.commit_id {
+        output::line(output::colon_value("commit", commit_id, Tone::Id));
+    }
+    Ok(())
+}
+
 fn run_conflict_resolve(workspace: &Workspace, args: cli::ConflictResolveArgs) -> Result<()> {
     let requested_expiration = args
         .at
@@ -717,6 +800,7 @@ fn run_conflict_resolve(workspace: &Workspace, args: cli::ConflictResolveArgs) -
             let kind = current.kind;
             let resolution =
                 conflict::apply_resolution(workspace, &current, &keep, requested_expiration)?;
+            conflict::remove_acceptance(workspace, &current.id)?;
             let message = match kind {
                 conflict::ConflictKind::ExactActiveDuplicate => format!(
                     "rem: resolve duplicate conflict {} keep memory {}",
