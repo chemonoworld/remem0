@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rem Semantic Conflict Review Research</title>
+  <style>
+    :root {
+      --bg: #f7f5f0;
+      --ink: #1d2528;
+      --muted: #5f6f73;
+      --line: #cfd8d6;
+      --accent: #0f766e;
+      --accent2: #9a3412;
+      --panel: #ffffff;
+      --soft: #e7f4ef;
+      --warn: #fff3d6;
+      --bad: #ffe3df;
+      --good: #e6f4d7;
+      --code: #243033;
+    }
+
+    * { box-sizing: border-box; }
+    html {
+      scroll-snap-type: y mandatory;
+      scroll-behavior: smooth;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body { margin: 0; }
+    .slide {
+      min-height: 100vh;
+      scroll-snap-align: start;
+      padding: 48px clamp(24px, 5vw, 72px);
+      display: grid;
+      align-content: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .kicker {
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    h1, h2, h3 { margin: 0; line-height: 1.04; letter-spacing: 0; }
+    h1 { font-size: clamp(44px, 7vw, 92px); max-width: 1120px; }
+    h2 { font-size: clamp(34px, 5vw, 64px); max-width: 1100px; }
+    h3 { font-size: clamp(22px, 2.2vw, 32px); margin-bottom: 12px; }
+    p, li { font-size: clamp(18px, 1.4vw, 24px); line-height: 1.45; }
+    p { max-width: 980px; color: var(--muted); }
+    ul { margin: 0; padding-left: 1.2em; }
+    li + li { margin-top: 10px; }
+    .lede { font-size: clamp(22px, 2.1vw, 34px); color: var(--ink); max-width: 1040px; }
+    .grid { display: grid; gap: 18px; margin-top: 28px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      box-shadow: 0 12px 30px rgba(29, 37, 40, .06);
+    }
+    .card p, .card li { font-size: 18px; }
+    .tag {
+      display: inline-block;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .warn { background: var(--warn); }
+    .bad { background: var(--bad); }
+    .good { background: var(--good); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      margin-top: 24px;
+      font-size: 16px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 12px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef2ef; font-size: 14px; text-transform: uppercase; letter-spacing: .06em; }
+    code {
+      background: var(--code);
+      color: #f4faf8;
+      padding: 2px 7px;
+      border-radius: 5px;
+      font-size: .9em;
+    }
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    pre code {
+      display: block;
+      padding: 18px;
+      line-height: 1.35;
+      font-size: 16px;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 28px;
+    }
+    .step {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      min-height: 140px;
+    }
+    .step strong { display: block; color: var(--accent); margin-bottom: 10px; }
+    .step span { color: var(--muted); font-size: 16px; line-height: 1.35; }
+    .quote {
+      border-left: 6px solid var(--accent);
+      padding-left: 24px;
+      font-size: clamp(22px, 2.2vw, 36px);
+      line-height: 1.28;
+      max-width: 1050px;
+    }
+    .footer {
+      position: fixed;
+      right: 18px;
+      bottom: 14px;
+      color: #7a8587;
+      font-size: 13px;
+      background: rgba(247, 245, 240, .85);
+      padding: 5px 8px;
+      border-radius: 5px;
+    }
+    a { color: var(--accent); }
+    @media (max-width: 860px) {
+      .slide { padding: 32px 20px; align-content: start; }
+      .grid.two, .grid.three, .grid.four, .flow { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="footer">semantic-memory-conflict-review · 2026-07-05</div>
+
+  <section class="slide">
+    <div class="kicker">rem research deck</div>
+    <h1>Semantic Conflict Review</h1>
+    <p class="lede">Git conflict는 파일 병합 문제다. Semantic conflict는 병합된 기억 중 무엇이 현재 사실인지, 과거 사실인지, 중복인지, 위험한지 판단하는 문제다.</p>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">core distinction</div>
+    <h2>Git-clean이어도 memory는 틀릴 수 있다</h2>
+    <div class="grid two">
+      <div class="card good">
+        <span class="tag">Git conflict</span>
+        <h3>파일 상태</h3>
+        <ul>
+          <li>동일 파일/라인 병합 실패</li>
+          <li>unmerged status 차단</li>
+          <li>diff/restore/include로 해결</li>
+        </ul>
+      </div>
+      <div class="card warn">
+        <span class="tag">Semantic conflict</span>
+        <h3>의미 상태</h3>
+        <ul>
+          <li>"커피 좋아함" vs "커피 끊음"</li>
+          <li>둘 다 Markdown으로는 정상</li>
+          <li>retrieval에서 현재값을 잘못 쓸 수 있음</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">external signals</div>
+    <h2>레퍼런스 시스템들이 주는 힌트</h2>
+    <div class="grid four">
+      <div class="card">
+        <span class="tag">Mem0</span>
+        <p>Add는 additive. correction은 update/delete로 명시 처리.</p>
+      </div>
+      <div class="card">
+        <span class="tag">OpenAI Memory</span>
+        <p>staleness, contradiction, source visibility, correction UX가 핵심.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Zep/Graphiti</span>
+        <p>temporal facts, invalidation, provenance, validity windows.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Recent papers</span>
+        <p>LLM-only freshness 판단보다 deterministic version aggregation이 강함.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">taxonomy</div>
+    <h2>Conflict를 먼저 쪼개야 한다</h2>
+    <table>
+      <thead><tr><th>Type</th><th>Example</th><th>Default handling</th></tr></thead>
+      <tbody>
+        <tr><td>Duplicate</td><td>동일 preference 반복</td><td>canonical 하나 선택, diagnostic 유지</td></tr>
+        <tr><td>Contradiction</td><td>likes coffee vs dislikes coffee</td><td>review 필요</td></tr>
+        <tr><td>Supersession</td><td>SQLite에서 Postgres로 이동</td><td>old historical, new current</td></tr>
+        <tr><td>Scope conflict</td><td>user Vim preference vs project Prettier rule</td><td>keep-both, scope retrieval</td></tr>
+        <tr><td>Temporal conflict</td><td>next month trip after trip ended</td><td>valid_to 또는 historical</td></tr>
+        <tr><td>Policy conflict</td><td>secret, sensitive data</td><td>block/delete/review</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">design principle</div>
+    <h2>LLM은 후보를 만들고, 규칙이 현재값을 고른다</h2>
+    <p class="quote">Embedding similarity는 후보 탐색에는 유용하지만, contradiction과 duplicate를 안정적으로 구분하는 freshness oracle은 아니다.</p>
+    <div class="grid three">
+      <div class="card"><h3>LLM에 맡길 것</h3><p>fact 후보 추출, conflict 설명, merge draft, semantic key 제안.</p></div>
+      <div class="card"><h3>규칙에 맡길 것</h3><p>timestamp, scope, source priority, explicit correction, validity window.</p></div>
+      <div class="card"><h3>사용자에게 맡길 것</h3><p>ambiguous entity, sensitive memory, long-term destructive rewrite.</p></div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">options</div>
+    <h2>구현 옵션 4개</h2>
+    <div class="grid two">
+      <div class="card">
+        <span class="tag">A. diagnostics-only</span>
+        <p>빠르고 안전하지만 stale fact를 막지는 못함. MVP 시작점.</p>
+      </div>
+      <div class="card">
+        <span class="tag">B. review queue</span>
+        <p>human-in-the-loop, Git diff 친화적. UX와 noise control이 중요.</p>
+      </div>
+      <div class="card">
+        <span class="tag">C. SQLite fact ledger</span>
+        <p>deterministic, local, testable. cache이므로 accepted decision은 Markdown에 writeback 필요.</p>
+      </div>
+      <div class="card">
+        <span class="tag">D. temporal graph</span>
+        <p>개념적으로 강하지만 local CLI MVP에는 무거움. post-MVP 후보.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">recommended architecture</div>
+    <h2>rem에는 hybrid ledger가 맞다</h2>
+    <div class="flow">
+      <div class="step"><strong>1. Parse</strong><span>Markdown memory files</span></div>
+      <div class="step"><strong>2. Extract</strong><span>candidate facts and keys</span></div>
+      <div class="step"><strong>3. Detect</strong><span>duplicate, contradiction, supersession</span></div>
+      <div class="step"><strong>4. Review</strong><span>evidence packet and proposal</span></div>
+      <div class="step"><strong>5. Writeback</strong><span>Markdown lifecycle metadata</span></div>
+      <div class="step"><strong>6. Commit</strong><span>transaction core + Git</span></div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">markdown writeback</div>
+    <h2>Accepted resolution은 Markdown에 남겨야 한다</h2>
+    <div class="grid two">
+      <div class="card">
+        <h3>Existing fields</h3>
+        <ul>
+          <li><code>status: superseded</code></li>
+          <li><code>supersedes: [old-id]</code></li>
+          <li><code>promoted_from</code></li>
+          <li><code>source / agent / session</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Likely additions</h3>
+        <ul>
+          <li><code>valid_from / valid_to</code></li>
+          <li><code>semantic_key</code></li>
+          <li><code>review_state</code></li>
+          <li><code>reviewed_at / reviewed_by</code></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">review UX</div>
+    <h2>CLI evidence packet이 핵심이다</h2>
+    <div class="card">
+      <pre><code>rem conflicts show c123
+
+type: contradiction
+key: user.preference.coffee
+old: m001 "User likes coffee"
+new: m042 "User stopped drinking coffee"
+sources:
+  - memories/long/m001.md updated 2026-06-20 source=agent
+  - memories/short/m042.md updated 2026-07-04 source=cli
+proposal: mark m001 superseded, promote m042 to current long-term memory</code></pre>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">MVP path</div>
+    <h2>추천 순서</h2>
+    <div class="grid two">
+      <div class="card good"><h3>1. Warn</h3><p><code>rem doctor --semantic</code>로 duplicate/obvious contradiction 후보만 표시.</p></div>
+      <div class="card good"><h3>2. Queue</h3><p><code>rem conflicts list/show</code>로 review 대상과 evidence 확인.</p></div>
+      <div class="card warn"><h3>3. Resolve</h3><p><code>keep-new</code>, <code>keep-old</code>, <code>keep-both</code>, <code>merge</code>, <code>mark-historical</code>.</p></div>
+      <div class="card warn"><h3>4. Block optionally</h3><p>기본은 warn. <code>--semantic-review</code> 또는 policy에서만 commit block.</p></div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">risk map</div>
+    <h2>가장 큰 위험들</h2>
+    <div class="grid three">
+      <div class="card bad"><h3>False positives</h3><p>비슷하지만 충돌 아닌 기억까지 review에 올리면 사용자가 꺼버림.</p></div>
+      <div class="card bad"><h3>Hidden rewrite</h3><p>LLM이 조용히 장기기억을 바꾸면 local-first 신뢰 모델과 충돌.</p></div>
+      <div class="card bad"><h3>Entity ambiguity</h3><p>Alex, project, agent identity가 섞이면 deterministic rule도 틀림.</p></div>
+      <div class="card warn"><h3>Schema bloat</h3><p>frontmatter가 너무 무거우면 Obsidian/hand-edit UX가 깨짐.</p></div>
+      <div class="card warn"><h3>Derived cache drift</h3><p>SQLite conflict state는 rebuild 가능해야 하며 canonical decision은 Markdown에 있어야 함.</p></div>
+      <div class="card warn"><h3>Policy mismatch</h3><p>agent auto-write와 human review 기준이 분리되면 보안 문제가 생김.</p></div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">architecture recommendation</div>
+    <h2>결론</h2>
+    <p class="lede">MVP는 temporal graph가 아니라 "Markdown lifecycle + SQLite semantic diagnostics + human review"가 맞다.</p>
+    <ul>
+      <li>Semantic conflict는 Git review 뒤에 오는 memory-aware review다.</li>
+      <li>LLM은 extraction/proposal에 쓰고, current-value resolution은 deterministic rule로 잠근다.</li>
+      <li>Accepted resolution은 반드시 Markdown에 남기고 transaction core로 commit한다.</li>
+      <li>Graphiti/Zep식 temporal graph는 개념은 차용하되 인프라는 post-MVP로 둔다.</li>
+    </ul>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">sources</div>
+    <h2>Primary references</h2>
+    <ul>
+      <li><a href="https://docs.mem0.ai/core-concepts/memory-operations/add">Mem0 Add Memory</a>, <a href="https://docs.mem0.ai/core-concepts/memory-operations/update">Update</a>, <a href="https://docs.mem0.ai/core-concepts/memory-operations/delete">Delete</a></li>
+      <li><a href="https://help.openai.com/en/articles/8590148-memory-faq">OpenAI Memory FAQ</a></li>
+      <li><a href="https://help.getzep.com/concepts">Zep Key Concepts</a>, <a href="https://github.com/getzep/graphiti">Graphiti README</a></li>
+      <li><a href="https://docs.letta.com/guides/core-concepts/stateful-agents">Letta Stateful Agents</a></li>
+      <li><a href="https://arxiv.org/abs/2606.01435">Don't Ask the LLM to Track Freshness</a>, <a href="https://arxiv.org/abs/2606.26511">Temporal Validity in Retrieval Memory</a>, <a href="https://arxiv.org/abs/2605.06527">STALE</a></li>
+    </ul>
+  </section>
+</body>
+</html>

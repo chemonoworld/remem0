@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rem Temporal Graph Semantic Cache Implementation Deck</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f4ef;
+      --ink: #17191c;
+      --muted: #606870;
+      --line: #d8d5ca;
+      --panel: #ffffff;
+      --green: #1c7d5a;
+      --blue: #1f67a6;
+      --red: #b54938;
+      --gold: #9b6b15;
+      --violet: #67589b;
+      --shadow: 0 16px 40px rgba(28, 31, 35, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    main {
+      height: 100vh;
+      overflow-y: auto;
+      scroll-snap-type: y mandatory;
+    }
+
+    section {
+      min-height: 100vh;
+      scroll-snap-align: start;
+      display: grid;
+      align-items: center;
+      padding: 48px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .content {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+    }
+
+    .kicker {
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 850;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 18px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 1020px;
+      margin-bottom: 26px;
+      font-size: clamp(46px, 7vw, 88px);
+      line-height: 0.96;
+    }
+
+    h2 {
+      max-width: 980px;
+      margin-bottom: 26px;
+      font-size: clamp(34px, 4.5vw, 58px);
+      line-height: 1.04;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 22px;
+    }
+
+    p, li {
+      font-size: clamp(18px, 1.7vw, 23px);
+      line-height: 1.5;
+    }
+
+    .lead {
+      max-width: 900px;
+      color: var(--muted);
+      font-size: clamp(21px, 2.1vw, 30px);
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .panel {
+      min-height: 100%;
+      padding: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 4px 18px rgba(28, 31, 35, 0.06);
+    }
+
+    .panel p {
+      color: var(--muted);
+      font-size: 18px;
+      margin-bottom: 0;
+    }
+
+    .metric {
+      display: block;
+      margin-bottom: 8px;
+      font-size: clamp(34px, 4vw, 58px);
+      line-height: 1;
+      font-weight: 900;
+      color: var(--green);
+    }
+
+    .tag {
+      display: inline-flex;
+      padding: 6px 10px;
+      margin-bottom: 14px;
+      border-radius: 999px;
+      background: #eef3f1;
+      color: var(--green);
+      font-size: 14px;
+      font-weight: 850;
+    }
+
+    .tag.blue { background: #edf4fb; color: var(--blue); }
+    .tag.gold { background: #fff6e2; color: var(--gold); }
+    .tag.red { background: #fff0ed; color: var(--red); }
+
+    .code {
+      overflow-x: auto;
+      white-space: pre;
+      padding: 22px;
+      border-radius: 8px;
+      background: #171b20;
+      color: #f4f2eb;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: clamp(14px, 1.5vw, 18px);
+      line-height: 1.55;
+    }
+
+    .table {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr 0.8fr 1.4fr;
+      border-top: 1px solid var(--line);
+    }
+
+    .row:first-child { border-top: 0; }
+    .row.header {
+      background: #ecebe3;
+      font-weight: 850;
+      color: var(--ink);
+    }
+
+    .cell {
+      padding: 12px 14px;
+      font-size: 16px;
+      color: var(--muted);
+      border-left: 1px solid var(--line);
+    }
+
+    .cell:first-child {
+      border-left: 0;
+      color: var(--ink);
+      font-weight: 750;
+    }
+
+    ul.clean {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    ul.clean li {
+      margin: 10px 0;
+      font-size: 18px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      padding: 18px;
+      min-height: 132px;
+      border-radius: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--blue);
+    }
+
+    .step span {
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.35;
+    }
+
+    .footer {
+      position: fixed;
+      right: 18px;
+      bottom: 14px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: #747a80;
+      background: rgba(245, 244, 239, 0.86);
+      backdrop-filter: blur(10px);
+      font-size: 13px;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+
+    @media (max-width: 900px) {
+      section { padding: 28px 18px; }
+      .cols-2, .cols-3, .cols-4, .flow { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+      .cell { border-left: 0; border-top: 1px solid var(--line); }
+      .row.header { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <div class="content">
+        <div class="kicker">diff deck · 2026-07-09 KST</div>
+        <h1>rem Temporal Graph Semantic Cache 구현 정리</h1>
+        <p class="lead">Markdown과 Git transaction boundary는 그대로 두고, SQLite cache 안에 temporal graph 모양의 entity / episode / fact / ontology layer를 파생 데이터로 추가했다.</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">scope</div>
+        <h2>이번 diff의 실제 범위</h2>
+        <div class="grid cols-4">
+          <div class="panel"><span class="metric">8</span><p>tracked files changed</p></div>
+          <div class="panel"><span class="metric">+380</span><p>tracked insertions</p></div>
+          <div class="panel"><span class="metric">1</span><p>new core module: <code>src/semantic.rs</code></p></div>
+          <div class="panel"><span class="metric">67</span><p>tests passed in full suite</p></div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">Diff report evidence: <a href="rem-temporal-graph-diff-report.html">rem-temporal-graph-diff-report.html</a>. Note: `src/semantic.rs` is untracked, so it was reviewed separately from the tracked diff.</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">north star</div>
+        <h2>핵심 설계 결정</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <span class="tag">Canonical</span>
+            <h3>Markdown + Git 유지</h3>
+            <p>메모리의 durable source는 계속 Markdown이고, commit/rollback의 경계는 기존 Git transaction core다.</p>
+          </div>
+          <div class="panel">
+            <span class="tag blue">Derived Cache</span>
+            <h3>SQLite에 temporal semantic index 추가</h3>
+            <p>Graph DB를 붙이지 않고 rebuild 가능한 SQLite cache에 entity, fact, episode, ontology tables를 만든다.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">user contract</div>
+        <h2>새로운 Markdown directive와 CLI</h2>
+        <div class="grid cols-2">
+          <div class="code">@fact User | PREFERS | Adidas | valid_from=2025-01-10 | valid_to=2025-04-02
+@fact User | PREFERS | Puma | valid_from=2025-04-02</div>
+          <div class="code">rem facts --entity User
+rem facts --relation works-at
+rem facts --at 2025-02-01
+rem facts --all
+rem facts --source</div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">기본 조회는 current facts만 보여주고, `--at`은 historical view, `--source`는 provenance를 함께 보여준다.</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">ontology</div>
+        <h2>작고 통제된 ontology로 시작</h2>
+        <div class="grid cols-4">
+          <div class="panel"><span class="tag">PREFERS</span><p>선호. 이전 current fact를 닫을 수 있는 relation.</p></div>
+          <div class="panel"><span class="tag blue">USES</span><p>도구/서비스 사용. 여러 current fact 허용.</p></div>
+          <div class="panel"><span class="tag gold">WORKS_AT</span><p>소속/직장. 보통 하나의 current가 자연스러움.</p></div>
+          <div class="panel"><span class="tag red">MENTIONS</span><p>약한 언급. invalidation rule 없음.</p></div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">전체 relation set: `PREFERS`, `DISLIKES`, `USES`, `WORKS_AT`, `HAS_PROJECT`, `PART_OF`, `SUPERSEDES`, `MENTIONS`.</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">schema</div>
+        <h2>SQLite semantic cache schema</h2>
+        <div class="flow">
+          <div class="step"><strong>semantic_entities</strong><span>canonical_name, kind, summary, timestamps</span></div>
+          <div class="step"><strong>semantic_episodes</strong><span>source memory, text hash, excerpt, source path</span></div>
+          <div class="step"><strong>semantic_facts</strong><span>subject, relation, object, validity window, confidence</span></div>
+          <div class="step"><strong>semantic_fact_sources</strong><span>fact to episode provenance link</span></div>
+          <div class="step"><strong>semantic_ontology_relations</strong><span>relation whitelist and policy metadata</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">transaction integration</div>
+        <h2>rebuild/commit 흐름 안에 semantic validation을 넣었다</h2>
+        <div class="flow">
+          <div class="step"><strong>1. Markdown read</strong><span>기존 memory parser로 canonical files 수집</span></div>
+          <div class="step"><strong>2. FTS index</strong><span>기존 memories / memories_fts insert</span></div>
+          <div class="step"><strong>3. Semantic extract</strong><span>`@fact` directive를 entity/fact/episode로 변환</span></div>
+          <div class="step"><strong>4. Diagnostics</strong><span>unsupported relation, bad time, duplicate fact id는 diagnostic</span></div>
+          <div class="step"><strong>5. Transaction</strong><span>diagnostic 발생 시 strict reindex 실패로 rollback</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">red team fixes</div>
+        <h2>레드팀 루프에서 실제로 잡은 버그</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>Temporal query correctness</h3>
+            <ul class="clean">
+              <li>미래 `valid_from` fact가 current에 섞이던 문제 차단.</li>
+              <li>미래 `valid_to`가 있는 bounded fact가 current에서 빠지던 문제 수정.</li>
+              <li>unix seconds를 TEXT가 아니라 numeric comparison으로 비교.</li>
+              <li>역전된 `valid_from` / `valid_to`, mixed time format, non-padded date 검증.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>Directive parser safety</h3>
+            <ul class="clean">
+              <li>Markdown fenced code와 indented code 안의 `@fact` 무시.</li>
+              <li>빈 segment, duplicate option, invalid confidence 차단.</li>
+              <li>`object_kind=value`와 relation normalization 테스트.</li>
+              <li>invalid `rem facts --at` 입력을 user error로 처리.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">changed files</div>
+        <h2>리뷰할 파일</h2>
+        <div class="table">
+          <div class="row header"><div class="cell">File</div><div class="cell">Change</div><div class="cell">Review focus</div><div class="cell">Notes</div></div>
+          <div class="row"><div class="cell">src/semantic.rs</div><div class="cell">new, 1107 lines</div><div class="cell">core logic</div><div class="cell">ontology, schema, extraction, query, time validation, unit tests</div></div>
+          <div class="row"><div class="cell">src/index.rs</div><div class="cell">+29/-1</div><div class="cell">rebuild path</div><div class="cell">semantic extraction runs inside deterministic SQLite rebuild</div></div>
+          <div class="row"><div class="cell">src/main.rs / src/cli.rs</div><div class="cell">CLI</div><div class="cell">user contract</div><div class="cell">adds `rem facts` and output modes</div></div>
+          <div class="row"><div class="cell">tests/cli.rs</div><div class="cell">+219</div><div class="cell">e2e coverage</div><div class="cell">current/historical/source/rollback/code fence/unix time cases</div></div>
+          <div class="row"><div class="cell">README.md</div><div class="cell">+20</div><div class="cell">docs</div><div class="cell">directive syntax, allowed relations, time formats</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">validation</div>
+        <h2>검증 결과</h2>
+        <div class="grid cols-3">
+          <div class="panel"><span class="tag">format</span><h3>cargo fmt --check</h3><p>passed</p></div>
+          <div class="panel"><span class="tag blue">static</span><h3>cargo clippy -- -D warnings</h3><p>passed</p></div>
+          <div class="panel"><span class="tag gold">build</span><h3>cargo check</h3><p>passed</p></div>
+          <div class="panel"><span class="tag">unit</span><h3>cargo test --bins</h3><p>19 passed</p></div>
+          <div class="panel"><span class="tag blue">integration</span><h3>cargo test --test cli</h3><p>48 passed</p></div>
+          <div class="panel"><span class="tag gold">e2e</span><h3>cargo test</h3><p>67 passed</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">review focus</div>
+        <h2>리뷰어가 집중할 부분</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>Semantic model</h3>
+            <ul class="clean">
+              <li>Relation whitelist가 MVP로 충분한지.</li>
+              <li>`@fact` directive를 Markdown body에 두는 UX가 괜찮은지.</li>
+              <li>`object_kind=value` 처리와 entity id normalization이 기대와 맞는지.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>Temporal semantics</h3>
+            <ul class="clean">
+              <li>`valid_to`를 exclusive upper bound로 둔 결정.</li>
+              <li>허용 time format: unix seconds, `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SSZ`.</li>
+              <li>current query가 runtime clock을 쓰는 점.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="content">
+        <div class="kicker">risks and follow-ups</div>
+        <h2>아직 의도적으로 남긴 것</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>Not implemented</h3>
+            <ul class="clean">
+              <li>LLM 기반 자동 fact extraction.</li>
+              <li>semantic conflict review UI.</li>
+              <li>entity merge review and canonical merge decisions.</li>
+              <li>external graph database integration.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>Current assumption</h3>
+            <ul class="clean">
+              <li>Semantic cache는 derived data이고 Git에 commit하지 않는다.</li>
+              <li>잘못된 semantic directive는 reindex diagnostic으로 보고 transaction rollback한다.</li>
+              <li>Ontology는 작게 시작하고, relation explosion은 whitelist로 막는다.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div class="footer">Scroll or Page Down · rem-temporal-graph-implementation-deck.html</div>
+</body>
+</html>

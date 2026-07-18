@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="rem 0.1.0 전체 사용법 가이드">
+  <title>rem 사용법 전체 가이드</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f3f7f6;
+      --surface: #ffffff;
+      --surface-soft: #eaf3f1;
+      --ink: #102a2d;
+      --muted: #567075;
+      --line: #c7d6d4;
+      --teal: #007c73;
+      --teal-dark: #005e58;
+      --blue: #1769aa;
+      --amber: #a25d00;
+      --red: #b34033;
+      --code: #102326;
+      --code-ink: #ebf7f4;
+      --shadow: 0 10px 28px rgba(16, 42, 45, 0.09);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      letter-spacing: 0;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+
+    code, pre, kbd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      padding: 1px 4px;
+      border: 1px solid #d6e2e0;
+      border-radius: 3px;
+      background: #f7fbfa;
+      color: #15514d;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 16px 0 0;
+      overflow-x: auto;
+      padding: 18px 20px;
+      border: 1px solid #1d4244;
+      border-radius: 6px;
+      background: var(--code);
+      color: var(--code-ink);
+      font-size: 14px;
+      line-height: 1.58;
+      tab-size: 2;
+    }
+
+    pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 60px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(243, 247, 246, 0.94);
+      backdrop-filter: blur(14px);
+    }
+
+    .brand {
+      color: var(--ink);
+      font-size: 20px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .brand span {
+      margin-left: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .top-links {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .top-links a { text-decoration: none; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 244px minmax(0, 1fr);
+      width: min(1440px, 100%);
+      margin: 0 auto;
+    }
+
+    .toc {
+      position: sticky;
+      top: 60px;
+      align-self: start;
+      height: calc(100vh - 60px);
+      overflow-y: auto;
+      padding: 28px 20px 40px 28px;
+      border-right: 1px solid var(--line);
+    }
+
+    .toc-title {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 6px 0;
+      color: #406065;
+      font-size: 14px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .toc a:hover { color: var(--teal); }
+
+    main {
+      min-width: 0;
+      padding: 0 42px 72px;
+    }
+
+    section {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 70px 0;
+      border-top: 1px solid var(--line);
+      scroll-margin-top: 76px;
+    }
+
+    section:first-child { border-top: 0; }
+
+    .cover {
+      min-height: min(720px, calc(100vh - 60px));
+      display: grid;
+      align-content: center;
+      padding-top: 48px;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--teal);
+      font-size: 13px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, h4, p { margin-top: 0; }
+
+    h1 {
+      max-width: 850px;
+      margin-bottom: 22px;
+      font-size: 58px;
+      line-height: 1.03;
+    }
+
+    h2 {
+      margin-bottom: 12px;
+      font-size: 36px;
+      line-height: 1.15;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      font-size: 21px;
+      line-height: 1.3;
+    }
+
+    h4 {
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+
+    .lead {
+      max-width: 830px;
+      margin-bottom: 26px;
+      color: var(--muted);
+      font-size: 22px;
+      line-height: 1.55;
+    }
+
+    .section-lead {
+      max-width: 820px;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .panel {
+      min-width: 0;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      box-shadow: 0 4px 15px rgba(16, 42, 45, 0.05);
+    }
+
+    .panel p:last-child,
+    .panel ul:last-child { margin-bottom: 0; }
+
+    .callout {
+      margin: 22px 0 0;
+      padding: 16px 18px;
+      border-left: 4px solid var(--teal);
+      background: var(--surface-soft);
+    }
+
+    .callout.warning {
+      border-left-color: var(--amber);
+      background: #fff6e8;
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: #fff0ee;
+    }
+
+    .callout strong { color: var(--ink); }
+
+    .stack > * + * { margin-top: 18px; }
+
+    .checklist, .plain-list {
+      margin: 12px 0 0;
+      padding-left: 20px;
+    }
+
+    .checklist li, .plain-list li { margin: 7px 0; }
+
+    .checklist li::marker { color: var(--teal); }
+
+    .label {
+      display: inline-block;
+      margin-bottom: 8px;
+      color: var(--teal-dark);
+      font-size: 12px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+
+    .path-tree {
+      margin-top: 18px;
+      padding: 18px 20px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      color: #305357;
+      white-space: pre;
+      overflow-x: auto;
+      font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 145px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--teal-dark);
+      font-size: 14px;
+    }
+
+    .flow-step span {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.42;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    thead th {
+      border-top: 0;
+      background: #e7f0ee;
+      color: #24474a;
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    td code { white-space: nowrap; }
+
+    .reference-group + .reference-group { margin-top: 30px; }
+
+    .reference-group h3 { margin-bottom: 12px; }
+
+    .option-list {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      gap: 0;
+      margin: 18px 0 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    .option-list dt, .option-list dd {
+      margin: 0;
+      padding: 10px 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .option-list dt:nth-of-type(1), .option-list dd:nth-of-type(1) {
+      border-top: 0;
+    }
+
+    .option-list dt {
+      color: #294f51;
+      font-weight: 800;
+    }
+
+    .option-list dd {
+      color: var(--muted);
+      border-left: 1px solid var(--line);
+    }
+
+    kbd {
+      display: inline-block;
+      min-width: 24px;
+      padding: 1px 5px;
+      border: 1px solid #9db3b1;
+      border-bottom-width: 2px;
+      border-radius: 3px;
+      background: #fbfdfc;
+      color: #24484b;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .muted { color: var(--muted); }
+
+    .footer {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding-top: 28px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 1020px) {
+      .layout { display: block; }
+      .toc {
+        position: sticky;
+        z-index: 9;
+        top: 60px;
+        display: flex;
+        gap: 16px;
+        width: 100%;
+        height: auto;
+        padding: 10px 18px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        background: rgba(243, 247, 246, 0.96);
+      }
+      .toc-title { display: none; }
+      .toc a { flex: 0 0 auto; padding: 3px 0; }
+      main { padding: 0 28px 60px; }
+      .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 700px) {
+      .topbar { min-height: 54px; padding: 0 16px; }
+      .top-links { display: none; }
+      .toc { top: 54px; }
+      main { padding: 0 16px 44px; }
+      section { padding: 48px 0; scroll-margin-top: 110px; }
+      .cover { min-height: auto; padding: 62px 0; }
+      h1 { font-size: 40px; }
+      h2 { font-size: 30px; }
+      .lead { font-size: 19px; }
+      .two, .three, .flow { grid-template-columns: 1fr; }
+      .option-list { grid-template-columns: 1fr; }
+      .option-list dd { border-left: 0; }
+      .option-list dt + dd { border-top: 0; padding-top: 0; }
+      th, td { padding: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#start">rem <span>CLI guide</span></a>
+    <nav class="top-links" aria-label="빠른 이동">
+      <a href="#quickstart">빠른 시작</a>
+      <a href="#reference">명령 레퍼런스</a>
+      <a href="#troubleshooting">문제 해결</a>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="문서 목차">
+      <p class="toc-title">목차</p>
+      <a href="#start">개요</a>
+      <a href="#install">설치와 업데이트</a>
+      <a href="#quickstart">초기화와 profile</a>
+      <a href="#configure">TUI와 config</a>
+      <a href="#memories">메모리 관리</a>
+      <a href="#transactions">Git transaction</a>
+      <a href="#search">검색</a>
+      <a href="#facts">Temporal facts</a>
+      <a href="#maintenance">유지보수</a>
+      <a href="#automation">자동화</a>
+      <a href="#reference">전체 레퍼런스</a>
+      <a href="#troubleshooting">문제 해결</a>
+    </nav>
+
+    <main>
+      <section class="cover" id="start">
+        <p class="eyebrow">rem 0.1.0 · 2026-07-10 KST</p>
+        <h1>rem 사용법 전체 가이드</h1>
+        <p class="lead">사람과 로컬 에이전트를 위한 Markdown memory CLI. Markdown은 원본이고, Git commit은 변경의 transaction boundary이며, SQLite는 재생성 가능한 검색·semantic cache입니다.</p>
+        <div class="grid three">
+          <article class="panel">
+            <span class="label">Canonical</span>
+            <h3>Markdown + Git</h3>
+            <p>메모리 파일과 Git history가 지속 상태입니다. SQLite DB는 Git에 들어가지 않습니다.</p>
+          </article>
+          <article class="panel">
+            <span class="label">Required</span>
+            <h3>GitHub / GitLab origin</h3>
+            <p>모든 vault는 Git repository root여야 하고 지원되는 <code>origin</code> remote가 있어야 합니다.</p>
+          </article>
+          <article class="panel">
+            <span class="label">Scope</span>
+            <h3>활성 profile 기반</h3>
+            <p>대부분의 명령은 현재 디렉터리가 아니라 config의 active profile vault를 사용합니다.</p>
+          </article>
+        </div>
+        <div class="callout">
+          <strong>중요:</strong> <code>rem doctor</code>, <code>rem facts</code>, <code>rem search</code>에는 <code>--root</code> 옵션이 없습니다. 다른 vault를 대상으로 하려면 <code>rem profile use &lt;name&gt;</code> 또는 <code>rem init --profile &lt;name&gt; --root ...</code>로 활성 profile을 바꾸세요.
+        </div>
+      </section>
+
+      <section id="install">
+        <p class="eyebrow">01 · local deployment</p>
+        <h2>설치, 확인, 업데이트, 삭제</h2>
+        <p class="section-lead">Repository에서 설치 스크립트를 실행하면 <code>$HOME/.cargo/bin/rem</code>에 user-level binary가 설치됩니다. 이 가이드는 설치된 <code>rem</code> 기준으로 표기합니다. 개발 중에는 앞에 <code>cargo run --</code>을 붙여 동일한 명령을 실행할 수 있습니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>첫 설치</h3>
+            <pre><code>cd /path/to/remem0
+./scripts/install-local.sh
+
+cd /tmp
+command -v rem
+rem --help</code></pre>
+            <p class="muted">스크립트는 <code>cargo install --path . --locked --offline --force</code>를 실행합니다. 필요한 Cargo dependency가 아직 local cache에 없다면 한 번 <code>cargo build</code>를 네트워크가 가능한 환경에서 실행하세요.</p>
+          </article>
+          <article class="panel">
+            <h3>PATH, update, uninstall</h3>
+            <pre><code># command -v rem 이 비어 있을 때
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# repository 변경 또는 pull 후
+git pull --ff-only
+./scripts/install-local.sh
+
+# 제거
+cargo uninstall rem</code></pre>
+            <p class="muted">zsh에서는 PATH export를 <code>~/.zshrc</code>에 넣은 뒤 새 terminal을 엽니다.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="quickstart">
+        <p class="eyebrow">02 · first vault</p>
+        <h2>Vault 초기화와 profile</h2>
+        <p class="section-lead">vault root는 subdirectory가 아니라 Git working tree의 최상위여야 합니다. <code>origin</code>은 GitHub 또는 GitLab host를 가리켜야 하며, HTTPS와 SSH remote 모두 사용할 수 있습니다.</p>
+        <pre><code>mkdir -p ~/rem-vault
+git -C ~/rem-vault init
+git -C ~/rem-vault remote add origin git@github.com:you/rem-vault.git
+
+rem init --root ~/rem-vault --storage git
+rem profile list
+rem doctor</code></pre>
+        <div class="grid two" style="margin-top: 22px;">
+          <article class="panel">
+            <h3>Storage mode</h3>
+            <dl class="option-list">
+              <dt><code>local</code></dt><dd>일반 로컬 Markdown vault입니다. Git requirement는 동일합니다.</dd>
+              <dt><code>obsidian</code></dt><dd>Obsidian vault path를 root로 씁니다. Obsidian Sync는 optional이며 Git이 transaction log입니다.</dd>
+              <dt><code>git</code></dt><dd>Git-backed vault를 나타내는 profile mode입니다. 실제로는 모든 mode가 GitHub/GitLab origin을 요구합니다.</dd>
+            </dl>
+          </article>
+          <article class="panel">
+            <h3>초기화 결과</h3>
+            <div class="path-tree">&lt;vault&gt;/
+  memories/short/
+  memories/long/
+  policies/
+  inbox/
+  archive/
+  .rem/cache/
+  .rem/tx/</div>
+            <p class="muted"><code>.rem/cache/</code>와 <code>.rem/tx/</code>는 자동으로 <code>.gitignore</code>에 들어가며 commit에서 제외됩니다.</p>
+          </article>
+        </div>
+        <div class="callout warning">
+          <strong>이미 dirty한 vault:</strong> 초기화 전에 변경이 있으면 interactive terminal에서 include / restore / abort를 고릅니다. script에서는 <code>--accept-external</code> 또는 <code>--restore-external</code> 중 하나를 명시해야 합니다.
+        </div>
+        <h3 style="margin-top: 32px;">여러 vault profile</h3>
+        <pre><code>rem profile add work ~/work-vault --storage git
+rem profile add obsidian ~/Documents/MyVault --storage obsidian
+rem profile list
+rem profile show work
+rem profile use work</code></pre>
+      </section>
+
+      <section id="configure">
+        <p class="eyebrow">03 · configuration</p>
+        <h2>TUI와 low-level config</h2>
+        <p class="section-lead">명령 없이 <code>rem</code>만 실행해도 configuration TUI가 열립니다. 명시적으로 열려면 <code>rem configure</code>를 사용합니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>Interactive TUI</h3>
+            <ul class="plain-list">
+              <li><kbd>Up</kbd> / <kbd>Down</kbd> 또는 <kbd>j</kbd> / <kbd>k</kbd>: field 이동</li>
+              <li><kbd>Enter</kbd>: 선택 field 편집, 편집 중 <kbd>Enter</kbd> 적용 / <kbd>Esc</kbd> 취소</li>
+              <li><kbd>S</kbd>: config 파일 기록. vault Git 조건은 초기화·mutation 시 검증합니다.</li>
+              <li><kbd>Ctrl</kbd>+<kbd>F</kbd>: <code>profile-root</code> 선택 시 사용자 <code>$HOME</code>를 기본 root로 탐색하는 fuzzy directory finder 열기</li>
+              <li>finder: 처음에는 <code>$HOME</code>가 채워진 path filter에 focus됩니다. 그대로 수정하거나 <kbd>Ctrl</kbd>+<kbd>A</kbd>로 바꾼 뒤, <kbd>Tab</kbd>/<kbd>Shift</kbd>+<kbd>Tab</kbd>으로 path 목록 focus를 전환합니다. 목록 focus에서만 <kbd>Up</kbd>/<kbd>Down</kbd> 또는 <kbd>j</kbd>/<kbd>k</kbd>로 경로를 고릅니다.</li>
+              <li><kbd>I</kbd>: 현재 profile vault를 초기화하고 transaction commit 생성</li>
+              <li><kbd>R</kbd>: defaults로 reset (기록하려면 다시 <kbd>S</kbd>)</li>
+              <li><kbd>Q</kbd>, <kbd>Esc</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd>: 종료</li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Script-friendly config</h3>
+            <pre><code>rem config init
+rem config path
+rem config show
+
+rem config set active-profile work
+rem config set default-search bm25
+rem config set editor "code --wait"
+
+rem config reset</code></pre>
+            <p class="muted">config key는 <code>active-profile</code>, <code>default-search</code>, <code>editor</code>뿐입니다. default search 값은 <code>auto</code>, <code>grep</code>, <code>bm25</code>, <code>vector</code>, <code>all</code> 중 하나입니다.</p>
+          </article>
+        </div>
+        <div class="callout">
+          <strong>Config 위치:</strong> 기본은 <code>$HOME/.rem/config.toml</code>이고, CI·테스트·격리 환경에서는 <code>REM_HOME=/tmp/rem-home rem ...</code>로 global config 위치만 분리할 수 있습니다. vault root 자체는 profile이 결정합니다.
+        </div>
+      </section>
+
+      <section id="memories">
+        <p class="eyebrow">04 · memory lifecycle</p>
+        <h2>메모리 추가, 조회, 편집, 보관, 승격</h2>
+        <p class="section-lead">메모리 mutation은 Markdown 작성, strict SQLite reindex, Git commit을 한 transaction으로 처리합니다. ID 전체 또는 고유한 prefix를 <code>&lt;ID&gt;</code> 자리에 넣을 수 있습니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>추가</h3>
+            <pre><code>rem add --short "임시 작업 문맥"
+
+rem add --long \
+  --scope project \
+  --kind decision \
+  --tag rust --tag cli \
+  --source human \
+  --agent codex \
+  --session sprint-9 \
+  "# Decision
+Use Markdown as canonical memory."</code></pre>
+            <p class="muted">type 기본값은 <code>short</code>, scope 기본값은 <code>user</code>, kind 기본값은 <code>note</code>, source 기본값은 <code>cli</code>입니다. <code>--short</code>, <code>--long</code>, <code>--type short|long</code> 중 하나로 type을 정합니다.</p>
+          </article>
+          <article class="panel">
+            <h3>목록과 본문 조회</h3>
+            <pre><code>rem list
+rem list --short --kind decision
+rem list --type long --scope project --tag rust
+rem list --all
+
+rem show &lt;ID-or-unique-prefix&gt;</code></pre>
+            <p class="muted"><code>list</code> filter: <code>--short</code>, <code>--long</code>, <code>--type</code>, <code>--scope user|project|agent|session</code>, <code>--kind fact|preference|decision|task|procedure|note|question</code>, <code>--tag</code>, <code>--all</code>. <code>--all</code>은 archive도 포함합니다.</p>
+          </article>
+        </div>
+        <div class="grid three" style="margin-top: 16px;">
+          <article class="panel">
+            <h3>수정</h3>
+            <pre><code>rem update &lt;ID&gt; "새 본문"
+rem update &lt;ID&gt; --append "추가 문단"
+
+rem edit &lt;ID&gt;</code></pre>
+            <p><code>edit</code>는 config <code>editor</code>, 없으면 <code>$EDITOR</code>, 없으면 <code>vi</code>로 파일을 연 뒤 종료 시 transaction을 수행합니다.</p>
+          </article>
+          <article class="panel">
+            <h3>보관 또는 hard delete</h3>
+            <pre><code># 기본: archive/로 이동
+rem delete &lt;ID&gt;
+
+# 파일을 제거
+rem delete &lt;ID&gt; --hard</code></pre>
+            <p>기본 delete는 status를 <code>archived</code>로 바꾸고 archive directory로 이동합니다. <code>--hard</code>는 Git history 외의 현재 파일을 제거합니다.</p>
+          </article>
+          <article class="panel">
+            <h3>Short → long 승격</h3>
+            <pre><code>rem promote &lt;short-ID&gt;
+rem promote &lt;short-ID&gt; "수정한 장기 메모리 본문"</code></pre>
+            <p>short memory는 유지하고, 새 long memory를 만들며 새 파일의 <code>promoted_from</code> metadata에 원본 ID를 기록합니다.</p>
+          </article>
+        </div>
+        <div class="callout">
+          <strong>모든 mutation 공통 옵션:</strong> <code>--accept-external</code>, <code>--restore-external</code>, <code>--non-interactive</code>. 대상은 <code>init</code>, <code>add</code>, <code>edit</code>, <code>update</code>, <code>delete</code>, <code>promote</code>입니다.
+        </div>
+      </section>
+
+      <section id="transactions">
+        <p class="eyebrow">05 · Git transaction boundary</p>
+        <h2>Manual Markdown 변경과 <code>rem commit</code></h2>
+        <p class="section-lead">Obsidian 또는 editor로 Markdown을 직접 바꾼 뒤에는 <code>rem commit</code>이 pending vault 변경을 검증하고, temporary SQLite index를 만든 뒤 atomic replace하고, cache/tx를 제외한 변경을 하나의 Git commit으로 기록합니다.</p>
+        <div class="flow" aria-label="transaction flow">
+          <div class="flow-step"><strong>1. validate</strong><span>Git root, GitHub/GitLab origin, pending tx journal, external Git state를 확인합니다.</span></div>
+          <div class="flow-step"><strong>2. snapshot</strong><span>vault 파일, current index, Git staging 상태를 journal에 snapshot합니다.</span></div>
+          <div class="flow-step"><strong>3. apply</strong><span>CRUD 결과 또는 manual Markdown 변경을 transaction 범위에서 처리합니다.</span></div>
+          <div class="flow-step"><strong>4. reindex</strong><span>temporary SQLite에 rebuild하고 diagnostic이 없을 때만 index를 교체합니다.</span></div>
+          <div class="flow-step"><strong>5. commit</strong><span>변경된 vault path만 Git commit하고 journal을 정리합니다. 실패하면 snapshot으로 rollback합니다.</span></div>
+        </div>
+        <div class="grid two" style="margin-top: 24px;">
+          <article class="panel">
+            <h3>기본과 dry run</h3>
+            <pre><code># editor / Obsidian에서 Markdown을 직접 변경한 뒤
+rem commit
+
+rem commit -m "sync manual vault edits"
+rem commit --dry-run</code></pre>
+            <p><code>--dry-run</code>은 commit 대상과 reindex diagnostic을 출력하지만 Git commit은 만들지 않습니다. 기본 message는 <code>rem: commit vault changes</code>입니다.</p>
+          </article>
+          <article class="panel">
+            <h3>Non-interactive script</h3>
+            <pre><code># 외부 변경을 포함
+rem commit --non-interactive \
+  --accept-external \
+  -m "sync agent changes"
+
+# 외부 변경을 버리고 진행
+rem commit --non-interactive \
+  --restore-external</code></pre>
+            <p><code>--accept-external</code>과 <code>--restore-external</code>은 서로 배타적입니다. policy를 지정하지 않은 non-interactive 실행은 실패합니다.</p>
+          </article>
+        </div>
+        <h3 style="margin-top: 32px;">Interactive external-change review</h3>
+        <div class="grid two">
+          <article class="panel">
+            <h4>기본 prompt</h4>
+            <p>dirty vault에서 mutation 또는 <code>rem commit</code>을 interactive terminal로 실행하면 <code>commit</code> / <code>restore</code> / <code>abort</code>를 선택합니다. 기본은 <code>commit</code>입니다.</p>
+          </article>
+          <article class="panel">
+            <h4>상세 review</h4>
+            <p><code>rem commit --review</code>는 <code>commit-all</code>, <code>pick</code>, <code>diff</code>, <code>restore-all</code>, <code>abort</code>를 제공합니다. <code>pick</code>에서는 file마다 <code>include</code>, <code>restore</code>, <code>diff</code>, <code>abort</code>를 고릅니다.</p>
+          </article>
+        </div>
+        <div class="callout danger">
+          <strong>Git merge conflict는 별도:</strong> Git status가 unmerged이면 <code>--accept-external</code>이나 review로 진행할 수 없습니다. 먼저 <code>git status</code>와 editor/Git tooling으로 conflict marker를 해결하고 <code>git add</code> 또는 <code>git merge --continue</code>를 끝낸 후 <code>rem commit --review</code>을 다시 실행하세요. Semantic conflict review는 아직 TODO이며 Git conflict review와 의도적으로 분리되어 있습니다.
+        </div>
+      </section>
+
+      <section id="search">
+        <p class="eyebrow">06 · retrieval</p>
+        <h2>Grep, BM25, auto 검색</h2>
+        <p class="section-lead">검색 결과는 tab-separated <code>id, memory_type, source, title, score, path</code>입니다. default search mode는 config의 <code>default-search</code>이며, 명령에서 mode flag를 주면 그것이 우선합니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>검색 명령</h3>
+            <pre><code>rem search "Markdown"
+rem search --grep "exact local scan"
+rem search --bm25 "SQLite"
+rem search --all "decision"
+rem search --mode auto "project context"</code></pre>
+            <p class="muted">explicit mode option: <code>--grep</code>, <code>--bm25</code>, <code>--vector</code>, <code>--all</code>, <code>--mode auto|grep|bm25|vector|all</code>.</p>
+          </article>
+          <article class="panel">
+            <h3>Mode 동작</h3>
+            <dl class="option-list">
+              <dt><code>grep</code></dt><dd>active Markdown memory의 title, body, tag를 case-insensitive하게 직접 scan합니다.</dd>
+              <dt><code>bm25</code></dt><dd>SQLite FTS5 index를 사용합니다. index가 없으면 <code>rem rebuild</code>가 필요합니다.</dd>
+              <dt><code>auto</code></dt><dd>grep와, 존재하면 BM25를 merge합니다. 기본값입니다.</dd>
+              <dt><code>all</code></dt><dd>현재 버전에서는 grep + 가능한 BM25 merge입니다.</dd>
+              <dt><code>vector</code></dt><dd>CLI value는 있으나 v1에서는 configured되지 않았으므로 오류를 반환합니다.</dd>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section id="facts">
+        <p class="eyebrow">07 · temporal semantic cache</p>
+        <h2>Temporal facts 작성과 조회</h2>
+        <p class="section-lead">semantic graph는 Markdown body의 명시적 <code>@fact</code> directive에서 파생되어 SQLite cache에 저장됩니다. source Markdown이 원본이고 별도 graph database는 없습니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>Markdown directive 문법</h3>
+            <pre><code>@fact subject | RELATION | object | key=value ...
+
+@fact User | PREFERS | Adidas | valid_from=2025-01-10 | valid_to=2025-04-02
+@fact User | PREFERS | Puma | valid_from=2025-04-02
+@fact User | USES | LegacyTool | valid_from=2020-01-01 | expired_at=2024-01-01
+@fact User | PART_OF | rem | object_kind=entity | confidence=0.9</code></pre>
+            <p>directive는 line 시작이 정확히 <code>@fact </code>여야 합니다. code fence나 HTML comment 안의 directive는 무시됩니다.</p>
+          </article>
+          <article class="panel">
+            <h3>허용 relation과 option</h3>
+            <p><code>PREFERS</code>, <code>DISLIKES</code>, <code>USES</code>, <code>WORKS_AT</code>, <code>HAS_PROJECT</code>, <code>PART_OF</code>, <code>SUPERSEDES</code>, <code>MENTIONS</code></p>
+            <dl class="option-list">
+              <dt><code>valid_from</code></dt><dd>유효 시작 시각</dd>
+              <dt><code>valid_to</code></dt><dd>유효 종료 시각. <code>valid_from</code>보다 뒤여야 합니다.</dd>
+              <dt><code>learned_at</code></dt><dd>학습 시각. 생략하면 memory의 updated_at을 사용합니다.</dd>
+              <dt><code>expired_at</code></dt><dd>명시적 만료 시각. validity time format과 같아야 합니다.</dd>
+              <dt><code>confidence</code></dt><dd><code>0.0</code>부터 <code>1.0</code>까지의 숫자</dd>
+              <dt><code>object_kind</code></dt><dd><code>entity</code> (기본) 또는 <code>value</code></dd>
+            </dl>
+          </article>
+        </div>
+        <div class="callout">
+          <strong>시간 형식:</strong> signed 64-bit Unix seconds (예: <code>-1</code>), zero-padded <code>YYYY-MM-DD</code>, 또는 UTC <code>YYYY-MM-DDTHH:MM:SSZ</code>. <code>valid_from</code>, <code>valid_to</code>, <code>expired_at</code>은 한 fact 안에서 같은 형식을 써야 합니다.
+        </div>
+        <h3 style="margin-top: 32px;">Fact query</h3>
+        <pre><code># 기본: 현재 유효한 active-memory facts
+rem facts
+
+rem facts --entity User
+rem facts --relation PREFERS
+rem facts --at 2025-04-01
+rem facts --at -1
+rem facts --all
+rem facts --entity User --source</code></pre>
+        <div class="grid two" style="margin-top: 20px;">
+          <article class="panel">
+            <h4>Filter semantics</h4>
+            <p><code>--entity</code>는 subject 또는 object의 canonical name을 case-insensitive하게 match합니다. <code>--relation</code>은 공백·hyphen을 underscore로 normalize한 후 대문자 relation과 비교합니다.</p>
+          </article>
+          <article class="panel">
+            <h4>Output semantics</h4>
+            <p>기본 출력은 fact ID, subject, relation, object, <code>valid_from</code>, <code>valid_to</code>, <code>expired_at</code>, <code>learned_at</code>, confidence, source memory ID의 TSV입니다. <code>--source</code>는 source path, episode ID, excerpt를 대신 포함합니다. <code>--at</code>과 <code>--all</code>은 함께 쓸 수 없습니다.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="maintenance">
+        <p class="eyebrow">08 · health and recovery</p>
+        <h2>Index rebuild와 doctor</h2>
+        <p class="section-lead">SQLite는 local cache이므로 필요할 때 재생성할 수 있습니다. <code>rebuild</code>는 Git commit을 만들지 않고 index만 temporary file에서 atomic replace합니다.</p>
+        <div class="grid two">
+          <article class="panel">
+            <h3>Cache refresh</h3>
+            <pre><code>rem rebuild
+rem search --bm25 "SQLite"
+rem facts --entity User</code></pre>
+            <p><code>rebuild</code> output은 indexed memory 수, diagnostics, semantic entity/episode/fact 수를 보여줍니다. malformed Markdown, duplicate memory ID, invalid <code>@fact</code>는 diagnostic이 됩니다.</p>
+          </article>
+          <article class="panel">
+            <h3>전체 health check</h3>
+            <pre><code>rem doctor</code></pre>
+            <p>vault directory, default policy 파일, index/diagnostics, semantic cache schema, Git remote, ignore rules, pending transaction journal을 <code>ok</code> / <code>warn</code> 형태로 출력합니다.</p>
+          </article>
+        </div>
+        <div class="callout warning">
+          <strong>남은 transaction journal:</strong> crash 등으로 <code>&lt;vault&gt;/.rem/tx/&lt;txid&gt;</code>가 남으면 <code>doctor</code>가 warning을 냅니다. vault를 확인·복구한 뒤 <code>rem commit</code>을 다시 실행하세요. cache와 tx directory는 Git에 commit하지 않습니다.
+        </div>
+      </section>
+
+      <section id="automation">
+        <p class="eyebrow">09 · scripting</p>
+        <h2>Agent와 CI에서 안전하게 실행하기</h2>
+        <p class="section-lead">script는 prompt에 의존하면 안 됩니다. global config를 격리하고 external-change policy를 명시하세요.</p>
+        <pre><code>export REM_HOME=/tmp/rem-agent-home
+
+# profile이 아직 없으면 init이 profile도 저장한다.
+rem init \
+  --root /workspace/vault \
+  --storage git \
+  --non-interactive \
+  --accept-external
+
+rem add --short \
+  --scope agent \
+  --source agent \
+  --non-interactive \
+  --accept-external \
+  "Build passed; release candidate is ready."
+
+# agent가 직접 편집한 Markdown을 함께 반영
+rem commit --non-interactive --accept-external -m "sync agent memory"</code></pre>
+        <div class="grid two" style="margin-top: 20px;">
+          <article class="panel">
+            <h3>전제조건 checklist</h3>
+            <ul class="checklist">
+              <li>profile root가 Git top-level directory다.</li>
+              <li><code>origin</code>이 <code>github.com</code> 또는 <code>gitlab.com</code>이다.</li>
+              <li>index/reindex가 valid Markdown과 semantic fact를 만들 수 있다.</li>
+              <li>external Git changes 처리 방침을 명시했다.</li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>자동화에서 피할 것</h3>
+            <ul class="checklist">
+              <li><code>--non-interactive</code>와 policy flag 없이 dirty vault를 mutation하지 않습니다.</li>
+              <li><code>--restore-external</code>은 manual/untracked 변경을 버릴 수 있으므로 자동 기본값으로 두지 않습니다.</li>
+              <li>Git unmerged conflict를 rem command로 억지로 해결하려 하지 않습니다.</li>
+              <li><code>--vector</code>는 현재 v1에서 구현되어 있지 않습니다.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="reference">
+        <p class="eyebrow">10 · complete command reference</p>
+        <h2>전체 CLI 명령과 옵션</h2>
+        <p class="section-lead">아래는 <code>rem --help</code>와 모든 subcommand help를 기준으로 정리한 전체 surface입니다. 전역 option은 <code>-h, --help</code>와 <code>-V, --version</code>입니다.</p>
+
+        <div class="reference-group">
+          <h3>Configure, profile, config, vault</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>명령</th><th>사용법 / 옵션</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>rem</code></td><td>인자 없음</td><td><code>rem configure</code>와 같은 TUI를 엽니다.</td></tr>
+                <tr><td><code>rem configure</code></td><td>옵션 없음</td><td>Interactive configuration TUI.</td></tr>
+                <tr><td><code>rem init</code></td><td><code>--root &lt;path&gt;</code> <code>--storage local|obsidian|git</code> <code>--profile &lt;name&gt;</code> + mutation options</td><td>vault directory/policy/cache를 만들고 profile을 저장하며 initialize Git commit을 만듭니다.</td></tr>
+                <tr><td><code>rem profile list</code></td><td>옵션 없음</td><td>모든 profile 및 active marker를 출력합니다.</td></tr>
+                <tr><td><code>rem profile show</code></td><td><code>[name]</code></td><td>active 또는 지정 profile의 name/storage/root를 출력합니다.</td></tr>
+                <tr><td><code>rem profile add</code></td><td><code>&lt;name&gt; &lt;root&gt; --storage local|obsidian|git</code></td><td>이미 유효한 Git vault를 profile에 add/replace합니다.</td></tr>
+                <tr><td><code>rem profile use</code></td><td><code>&lt;name&gt;</code></td><td>active profile을 변경합니다.</td></tr>
+                <tr><td><code>rem config init|path|show|reset</code></td><td>옵션 없음</td><td>config 생성, path 출력, TOML 출력, default reset.</td></tr>
+                <tr><td><code>rem config set</code></td><td><code>active-profile|default-search|editor &lt;value&gt;</code></td><td>한 config value를 갱신합니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="reference-group">
+          <h3>Memory lifecycle</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>명령</th><th>사용법 / 옵션</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>rem add</code></td><td><code>[TEXT...]</code>; <code>--short|--long|--type short|long</code>; <code>--scope user|project|agent|session</code>; <code>--kind fact|preference|decision|task|procedure|note|question</code>; repeated <code>--tag</code>; <code>--source</code>; <code>--agent</code>; <code>--session</code> + mutation options</td><td>새 active memory를 만들고 자동 commit합니다.</td></tr>
+                <tr><td><code>rem list</code></td><td><code>--short|--long|--type</code>; <code>--scope</code>; <code>--kind</code>; <code>--tag</code>; <code>--all</code></td><td>filter된 TSV memory 목록입니다.</td></tr>
+                <tr><td><code>rem show</code></td><td><code>&lt;id-or-unique-prefix&gt;</code></td><td>memory Markdown frontmatter와 body를 출력합니다.</td></tr>
+                <tr><td><code>rem edit</code></td><td><code>&lt;id&gt;</code> + mutation options</td><td>외부 editor로 열고 성공 종료 시 reindex/commit합니다.</td></tr>
+                <tr><td><code>rem update</code></td><td><code>&lt;id&gt; [TEXT...]</code>; <code>--append</code> + mutation options</td><td>본문을 replace하거나 append합니다.</td></tr>
+                <tr><td><code>rem delete</code></td><td><code>&lt;id&gt;</code>; <code>--hard</code> + mutation options</td><td>기본 archive, <code>--hard</code>는 파일 삭제입니다.</td></tr>
+                <tr><td><code>rem promote</code></td><td><code>&lt;short-id&gt; [TEXT...]</code> + mutation options</td><td>새 long memory를 만들고 <code>promoted_from</code>을 기록합니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="reference-group">
+          <h3>Transaction, retrieval, health</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>명령</th><th>사용법 / 옵션</th><th>설명</th></tr></thead>
+              <tbody>
+                <tr><td><code>rem commit</code></td><td><code>-m, --message &lt;text&gt;</code>; <code>--accept-external</code>; <code>--restore-external</code>; <code>--review</code>; <code>--dry-run</code>; <code>--non-interactive</code></td><td>pending Markdown 변경을 validate, reindex, Git commit합니다.</td></tr>
+                <tr><td><code>rem search</code></td><td><code>[QUERY...]</code>; <code>--grep</code>; <code>--bm25</code>; <code>--vector</code>; <code>--all</code>; <code>--mode auto|grep|bm25|vector|all</code></td><td>active memory 검색입니다.</td></tr>
+                <tr><td><code>rem facts</code></td><td><code>--entity &lt;name&gt;</code>; <code>--relation &lt;relation&gt;</code>; <code>--at &lt;time&gt;</code>; <code>--all</code>; <code>--source</code></td><td>derived semantic facts TSV를 query합니다. <code>--at</code>과 <code>--all</code>은 배타적입니다.</td></tr>
+                <tr><td><code>rem rebuild</code></td><td>옵션 없음</td><td>SQLite search/semantic cache만 재생성합니다. Git commit 없음.</td></tr>
+                <tr><td><code>rem doctor</code></td><td>옵션 없음</td><td>config, vault, policy, cache, Git, journal 상태를 검사합니다.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="callout">
+          <strong>Mutation option summary:</strong> <code>--accept-external</code>은 기존 vault 변경을 현재 commit에 포함하고, <code>--restore-external</code>은 그 변경을 복원/폐기하며, <code>--non-interactive</code>는 prompt를 막습니다. 두 policy flag는 함께 쓸 수 없습니다. <code>rem commit --review</code>은 두 policy flag 및 <code>--non-interactive</code>와 함께 쓸 수 없습니다.
+        </div>
+      </section>
+
+      <section id="troubleshooting">
+        <p class="eyebrow">11 · recovery guide</p>
+        <h2>자주 마주치는 오류와 대응</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>증상</th><th>원인</th><th>대응</th></tr></thead>
+            <tbody>
+              <tr><td><code>rem: command not found</code></td><td>Cargo user bin directory가 PATH에 없음</td><td><code>export PATH="$HOME/.cargo/bin:$PATH"</code>를 shell profile에 추가하고 새 terminal을 엽니다.</td></tr>
+              <tr><td>vault root is not a Git repository / must be the Git repository root</td><td>root가 Git repository가 아니거나 subdirectory임</td><td><code>git -C &lt;root&gt; rev-parse --show-toplevel</code>이 root와 같은지 확인합니다.</td></tr>
+              <tr><td>remote origin must point to GitHub or GitLab</td><td><code>origin</code> 없음 또는 지원되지 않는 host</td><td><code>git -C &lt;root&gt; remote add origin git@github.com:you/vault.git</code>처럼 설정합니다.</td></tr>
+              <tr><td>external vault changes detected</td><td>기존 manual / Obsidian / agent 변경이 있음</td><td>interactive면 선택하고, script면 <code>--accept-external</code> 또는 <code>--restore-external</code>을 명시합니다.</td></tr>
+              <tr><td>unmerged Git conflict detected</td><td>Git merge/rebase conflict가 아직 해소되지 않음</td><td>Git/editor로 conflict marker를 해결하고 Git conflict를 끝낸 뒤 <code>rem commit --review</code>를 다시 실행합니다.</td></tr>
+              <tr><td>reindex produced diagnostics</td><td>malformed frontmatter, duplicate ID, invalid semantic fact, symlinked memory 등</td><td>오류가 가리킨 Markdown을 고친 뒤 다시 실행합니다. transaction mutation은 rollback됩니다.</td></tr>
+              <tr><td>BM25/facts index does not exist</td><td>SQLite cache가 없음 또는 오래됨</td><td><code>rem rebuild</code>를 실행합니다.</td></tr>
+              <tr><td>semantic cache schema missing</td><td>이전 index 또는 cache 손상</td><td><code>rem rebuild</code>로 local cache를 재생성합니다.</td></tr>
+              <tr><td>pending transaction journal</td><td>이전 process가 crash 또는 강제 종료</td><td><code>rem doctor</code> 결과를 확인하고 vault recovery 후 <code>rem commit</code>을 재시도합니다.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>최소 진단 순서:</strong> <code>rem profile show</code> → <code>rem doctor</code> → <code>git -C &lt;vault&gt; status --short</code> → 필요 시 <code>rem rebuild</code> → <code>rem commit --dry-run</code>.
+        </div>
+      </section>
+
+      <footer class="footer">
+        이 문서는 repository의 <code>rem --help</code>, 모든 subcommand help, <code>README.md</code>, <code>docs/local-deployment.md</code>, 현재 구현을 기준으로 작성했습니다. Markdown과 Git history가 원본이며 SQLite cache는 재생성 가능합니다.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

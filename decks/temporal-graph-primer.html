@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Temporal Graph Primer for rem</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f2;
+      --ink: #191c1f;
+      --muted: #5a626b;
+      --line: #d9d7cc;
+      --panel: #ffffff;
+      --green: #1b7f5a;
+      --blue: #2267a5;
+      --red: #b14432;
+      --gold: #a06d13;
+      --violet: #6b5799;
+      --shadow: 0 16px 40px rgba(32, 35, 38, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+
+    main.deck {
+      height: 100vh;
+      overflow: auto;
+      scroll-snap-type: y mandatory;
+    }
+
+    section.slide {
+      min-height: 100vh;
+      scroll-snap-align: start;
+      display: grid;
+      align-items: center;
+      padding: 48px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .content {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+    }
+
+    .kicker {
+      color: var(--blue);
+      font-weight: 800;
+      text-transform: uppercase;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      margin-bottom: 18px;
+    }
+
+    h1, h2, h3, p {
+      margin-top: 0;
+    }
+
+    h1 {
+      font-size: clamp(48px, 7vw, 92px);
+      line-height: 0.95;
+      max-width: 980px;
+      margin-bottom: 26px;
+    }
+
+    h2 {
+      font-size: clamp(34px, 4.6vw, 62px);
+      line-height: 1.03;
+      margin-bottom: 26px;
+    }
+
+    h3 {
+      font-size: 22px;
+      margin-bottom: 12px;
+    }
+
+    p, li {
+      font-size: clamp(18px, 1.8vw, 24px);
+      line-height: 1.48;
+    }
+
+    .lead {
+      max-width: 850px;
+      color: var(--muted);
+      font-size: clamp(21px, 2.1vw, 30px);
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      box-shadow: 0 4px 18px rgba(30, 33, 36, 0.06);
+    }
+
+    .panel strong {
+      color: var(--ink);
+    }
+
+    .panel p {
+      color: var(--muted);
+      font-size: 18px;
+      margin-bottom: 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #eef3f1;
+      color: var(--green);
+      font-size: 14px;
+      font-weight: 800;
+      margin-bottom: 14px;
+    }
+
+    .formula {
+      background: #16191c;
+      color: #f5f5ef;
+      padding: 24px;
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: clamp(15px, 1.6vw, 20px);
+      line-height: 1.55;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 32px;
+      align-items: center;
+    }
+
+    .diagram {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 470px;
+      padding: 28px;
+      position: relative;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .node {
+      position: absolute;
+      min-width: 126px;
+      text-align: center;
+      padding: 14px 16px;
+      border-radius: 999px;
+      background: #fff;
+      border: 2px solid var(--blue);
+      font-weight: 850;
+      box-shadow: 0 8px 20px rgba(34, 103, 165, 0.14);
+    }
+
+    .node.user { left: 60px; top: 190px; border-color: var(--green); }
+    .node.adidas { right: 86px; top: 96px; border-color: var(--red); }
+    .node.puma { right: 90px; bottom: 92px; border-color: var(--blue); }
+
+    .edge {
+      position: absolute;
+      height: 2px;
+      background: var(--line);
+      transform-origin: left center;
+    }
+
+    .edge.a {
+      width: 310px;
+      left: 186px;
+      top: 198px;
+      transform: rotate(-18deg);
+    }
+
+    .edge.b {
+      width: 315px;
+      left: 186px;
+      top: 260px;
+      transform: rotate(17deg);
+    }
+
+    .edge-label {
+      position: absolute;
+      background: #fffaf1;
+      border: 1px solid #e8d6af;
+      color: var(--gold);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-weight: 850;
+      box-shadow: 0 6px 16px rgba(160, 109, 19, 0.12);
+    }
+
+    .edge-label.a { left: 300px; top: 122px; }
+    .edge-label.b { left: 298px; bottom: 128px; color: var(--blue); background: #f0f6fb; border-color: #c5d9ea; }
+
+    .timeline {
+      display: grid;
+      gap: 16px;
+      margin-top: 26px;
+    }
+
+    .time-row {
+      display: grid;
+      grid-template-columns: 170px 1fr;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .date {
+      font-weight: 850;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .bar {
+      min-height: 48px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      color: white;
+      font-weight: 850;
+    }
+
+    .bar.old {
+      width: 55%;
+      background: var(--red);
+    }
+
+    .bar.now {
+      width: 100%;
+      background: var(--blue);
+    }
+
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .compare > div {
+      padding: 24px;
+    }
+
+    .compare > div + div {
+      border-left: 1px solid var(--line);
+    }
+
+    .bad {
+      border-top: 6px solid var(--red);
+    }
+
+    .good {
+      border-top: 6px solid var(--green);
+    }
+
+    .small-list {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    .small-list li {
+      font-size: 18px;
+      margin: 10px 0;
+    }
+
+    .source-list li {
+      font-size: 16px;
+      margin: 8px 0;
+      color: var(--muted);
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+
+    .footer {
+      position: fixed;
+      right: 18px;
+      bottom: 14px;
+      color: #747a80;
+      font-size: 13px;
+      background: rgba(247, 247, 242, 0.84);
+      border: 1px solid var(--line);
+      padding: 7px 10px;
+      border-radius: 999px;
+      backdrop-filter: blur(10px);
+    }
+
+    @media (max-width: 820px) {
+      section.slide {
+        padding: 28px 18px;
+      }
+
+      .split,
+      .cols-2,
+      .cols-3,
+      .compare {
+        grid-template-columns: 1fr;
+      }
+
+      .compare > div + div {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .diagram {
+        min-height: 420px;
+      }
+
+      .node {
+        min-width: 104px;
+        font-size: 14px;
+      }
+
+      .node.user { left: 22px; top: 180px; }
+      .node.adidas { right: 22px; top: 80px; }
+      .node.puma { right: 22px; bottom: 80px; }
+      .edge.a, .edge.b { width: 190px; left: 124px; }
+      .edge-label.a { left: 152px; top: 120px; }
+      .edge-label.b { left: 152px; bottom: 122px; }
+      .time-row {
+        grid-template-columns: 1fr;
+      }
+      .bar.old {
+        width: 70%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck" aria-label="Temporal graph presentation deck">
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">rem semantic memory research</div>
+        <h1>Temporal Graph가 정확히 뭐냐</h1>
+        <p class="lead">한 줄로 말하면, 시간이 지나며 바뀌는 사실을 삭제하지 않고 <strong>언제 참이었는지</strong>, <strong>지금도 참인지</strong>, <strong>무슨 근거로 아는지</strong>까지 저장하는 그래프다.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">mental model</div>
+        <h2>일반 그래프는 관계를 저장하고, temporal graph는 관계의 수명까지 저장한다</h2>
+        <div class="grid cols-3">
+          <div class="panel">
+            <span class="tag">Node</span>
+            <h3>Entity</h3>
+            <p>사람, 프로젝트, 회사, 도구, 취향 같은 대상. 예: User, Puma, rem, SQLite.</p>
+          </div>
+          <div class="panel">
+            <span class="tag">Edge</span>
+            <h3>Fact</h3>
+            <p>두 대상 사이의 주장. 예: User PREFERS Puma, rem USES SQLite.</p>
+          </div>
+          <div class="panel">
+            <span class="tag">Time</span>
+            <h3>Validity</h3>
+            <p>그 주장이 언제부터 언제까지 참이었는지. 현재 참이면 종료 시각이 비어 있다.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content split">
+        <div>
+          <div class="kicker">example</div>
+          <h2>"아디다스 좋아함"과 "이제 푸마가 좋음"은 충돌이 아니라 시간 변화일 수 있다</h2>
+          <p class="lead">기존 메모리 시스템은 둘 다 검색해서 모델을 헷갈리게 만들 수 있다. Temporal graph는 옛 사실의 창을 닫고 새 사실을 현재 사실로 둔다.</p>
+        </div>
+        <div class="diagram" aria-label="Temporal graph diagram">
+          <div class="edge a"></div>
+          <div class="edge b"></div>
+          <div class="node user">User</div>
+          <div class="node adidas">Adidas</div>
+          <div class="node puma">Puma</div>
+          <div class="edge-label a">PREFERS<br>2025-01-10 - 2025-04-02</div>
+          <div class="edge-label b">PREFERS<br>2025-04-02 - now</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">the difference</div>
+        <h2>flat memory vs temporal graph</h2>
+        <div class="compare">
+          <div class="bad">
+            <h3>Flat memory</h3>
+            <ul class="small-list">
+              <li>2025-01-10: User likes Adidas.</li>
+              <li>2025-04-02: User now prefers Puma.</li>
+              <li>검색 결과에 둘 다 나오면 현재 선호를 판단하기 어렵다.</li>
+              <li>오래된 사실을 삭제하면 과거 맥락도 사라진다.</li>
+            </ul>
+          </div>
+          <div class="good">
+            <h3>Temporal graph</h3>
+            <ul class="small-list">
+              <li>Adidas fact: 2025-01-10부터 2025-04-02까지 valid.</li>
+              <li>Puma fact: 2025-04-02부터 현재까지 valid.</li>
+              <li>현재 질문에는 Puma만 답한다.</li>
+              <li>과거 질문에는 Adidas도 살아 있다.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">timestamps</div>
+        <h2>중요한 건 시간도 한 종류가 아니라는 점</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <span class="tag">valid time</span>
+            <h3>세상에서 언제 참이었나</h3>
+            <p>사용자가 실제로 푸마를 선호하게 된 날짜. Zep/Graphiti 문맥에서는 `valid_at`, `invalid_at`에 가깝다.</p>
+          </div>
+          <div class="panel">
+            <span class="tag">transaction time</span>
+            <h3>시스템이 언제 알았나</h3>
+            <p>`rem`이 그 사실을 기록하거나 커밋한 시각. `created_at`, `learned_at`, `expired_at`에 가깝다.</p>
+          </div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">둘을 분리하면 "4월 2일부터 참이었지만 4월 5일에 알았다" 같은 상황을 표현할 수 있다. 이게 bitemporal 모델의 핵심이다.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">query behavior</div>
+        <h2>Temporal graph가 가능하게 하는 질문</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>현재 상태</h3>
+            <p>"지금 사용자가 선호하는 브랜드는?" -> `valid_to is null`인 현재 fact만 본다.</p>
+          </div>
+          <div class="panel">
+            <h3>과거 상태</h3>
+            <p>"2025년 1월에는 뭘 좋아했나?" -> 해당 시각에 열려 있던 fact를 본다.</p>
+          </div>
+          <div class="panel">
+            <h3>변경 이유</h3>
+            <p>"왜 바뀌었나?" -> fact에 연결된 source episode를 열어 근거를 보여준다.</p>
+          </div>
+          <div class="panel">
+            <h3>충돌 검토</h3>
+            <p>"새 fact가 기존 current fact를 닫아야 하나?" -> semantic review의 핵심 작업이 된다.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">zep / graphiti lesson</div>
+        <h2>Zep/Graphiti에서 배울 점은 "그래프 DB"보다 "시간 달린 fact ledger"다</h2>
+        <div class="grid cols-3">
+          <div class="panel">
+            <h3>Entities</h3>
+            <p>텍스트에서 명사를 뽑고, 같은 대상을 dedupe/merge한다.</p>
+          </div>
+          <div class="panel">
+            <h3>Facts</h3>
+            <p>관계를 edge로 저장하고 `valid_at`, `invalid_at` 같은 시간을 붙인다.</p>
+          </div>
+          <div class="panel">
+            <h3>Episodes</h3>
+            <p>원본 대화/문서/메모를 보존해서 fact의 근거를 추적한다.</p>
+          </div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">즉, 오래된 fact를 없애는 게 아니라 "언제까지 참이었는지" 닫는다. 이게 semantic conflict 처리의 중심 모델이 될 수 있다.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">what rem should do first</div>
+        <h2>`rem`은 외부 graph DB부터 붙이지 말고 SQLite에 temporal graph 모양의 cache를 먼저 만들자</h2>
+        <div class="formula">semantic_entities(id, canonical_name, kind, summary)
+semantic_episodes(id, source_memory_id, created_at, text_hash, excerpt)
+semantic_facts(
+  id,
+  subject_id,
+  relation,
+  object_id_or_value,
+  valid_from,
+  valid_to,
+  learned_at,
+  expired_at,
+  source_memory_id,
+  confidence
+)
+semantic_fact_sources(fact_id, episode_id)</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">architecture fit</div>
+        <h2>현재 `rem` 구조에는 derived temporal index가 잘 맞는다</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>그대로 유지</h3>
+            <ul class="small-list">
+              <li>Markdown이 canonical source.</li>
+              <li>Git commit이 transaction boundary.</li>
+              <li>SQLite는 rebuild 가능한 local cache.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>추가할 것</h3>
+            <ul class="small-list">
+              <li>entity/fact/episode derived tables.</li>
+              <li>fact validity windows.</li>
+              <li>semantic fact diff/review workflow.</li>
+            </ul>
+          </div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">Canonical 데이터를 바꾸지 않고 cache만 확장하면, 실패 시 rollback과 deterministic rebuild 원칙을 지킬 수 있다.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">do not confuse these</div>
+        <h2>Git conflict와 semantic conflict는 다른 층이다</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>Git conflict</h3>
+            <p>같은 파일/라인을 여러 쪽에서 수정해서 Git merge가 자동으로 못 끝내는 상태. 파일 병합 문제다.</p>
+          </div>
+          <div class="panel">
+            <h3>Semantic conflict</h3>
+            <p>파일 병합은 됐지만 의미상 현재 사실이 충돌하는 상태. 예: 선호 브랜드, 직장, 프로젝트 상태가 바뀜.</p>
+          </div>
+        </div>
+        <p class="lead" style="margin-top: 28px;">Temporal graph는 두 번째 문제를 다룬다. "둘 중 하나 삭제"가 아니라 "각 fact의 유효 기간을 정리"하는 방향이다.</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">adoption path</div>
+        <h2>추천 로드맵</h2>
+        <div class="timeline">
+          <div class="time-row">
+            <div class="date">Phase 1</div>
+            <div class="bar now" style="background: var(--green);">SQLite temporal graph-shaped cache</div>
+          </div>
+          <div class="time-row">
+            <div class="date">Phase 2</div>
+            <div class="bar now" style="background: var(--blue);">semantic fact diff/review</div>
+          </div>
+          <div class="time-row">
+            <div class="date">Phase 3</div>
+            <div class="bar now" style="background: var(--gold);">entity merge + relation ontology</div>
+          </div>
+          <div class="time-row">
+            <div class="date">Phase 4</div>
+            <div class="bar now" style="background: var(--violet);">optional Graphiti/graph DB backend</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">trade-offs</div>
+        <h2>좋은 점과 위험한 점</h2>
+        <div class="grid cols-2">
+          <div class="panel">
+            <h3>장점</h3>
+            <ul class="small-list">
+              <li>현재 사실과 과거 사실을 분리한다.</li>
+              <li>오래된 정보를 삭제하지 않고 무효화한다.</li>
+              <li>semantic conflict를 reviewable하게 만든다.</li>
+              <li>모든 fact에 source/provenance를 붙일 수 있다.</li>
+            </ul>
+          </div>
+          <div class="panel">
+            <h3>비용</h3>
+            <ul class="small-list">
+              <li>entity extraction과 merge가 틀릴 수 있다.</li>
+              <li>relation ontology가 없으면 edge가 난잡해진다.</li>
+              <li>LLM extraction은 deterministic rebuild와 충돌할 수 있다.</li>
+              <li>graph DB는 운영 복잡도를 크게 올린다.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">bottom line</div>
+        <h2>Temporal graph로 간다는 말의 현실적인 의미</h2>
+        <p class="lead">`rem`에서 temporal graph는 "메모리를 그래프 DB로 갈아엎자"가 아니다. 더 정확히는, Markdown 원본 위에 <strong>시간 달린 entity/fact/episode index</strong>를 만들고, semantic conflict를 fact validity review 문제로 바꾸자는 뜻이다.</p>
+        <div class="formula" style="margin-top: 30px;">old approach:
+  retrieve similar notes -> model guesses current truth
+
+temporal graph approach:
+  retrieve current facts + source episodes + historical facts when needed</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="content">
+        <div class="kicker">sources</div>
+        <h2>참고한 핵심 자료</h2>
+        <ul class="source-list">
+          <li><a href="https://help.getzep.com/concepts">Zep Key Concepts</a>, <a href="https://help.getzep.com/graph-overview">Graph Overview</a>, <a href="https://help.getzep.com/facts">Facts</a>, <a href="https://help.getzep.com/entities">Entities</a>, <a href="https://help.getzep.com/episodes">Episodes</a></li>
+          <li><a href="https://github.com/getzep/graphiti">Graphiti README</a></li>
+          <li><a href="https://learn.microsoft.com/en-us/sql/relational-databases/tables/temporal-tables?view=sql-server-ver17">Microsoft SQL Server temporal tables</a></li>
+          <li><a href="https://arxiv.org/abs/1503.00278">An Introduction to Temporal Graphs</a></li>
+          <li><a href="https://arxiv.org/abs/1401.1919">Temporal Graph Traversals</a></li>
+          <li><a href="https://arxiv.org/abs/2501.13956">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a></li>
+          <li><a href="https://arxiv.org/abs/1604.08568">Towards Temporal Graph Databases</a></li>
+          <li><a href="https://arxiv.org/abs/2002.03274">A Distributed Path Query Engine for Temporal Property Graphs</a></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+  <div class="footer">Scroll or Page Down · temporal-graph-primer.html</div>
+</body>
+</html>

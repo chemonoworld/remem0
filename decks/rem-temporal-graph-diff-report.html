@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Diff Report</title>
+<style>
+body { margin: 0; background: #f6f8fa; color: #24292f; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 1120px; margin: 0 auto; padding: 32px 24px 56px; background: #ffffff; min-height: 100vh; box-sizing: border-box; }
+h1 { font-size: 28px; margin: 0 0 16px; }
+h2 { border-top: 1px solid #d8dee4; padding-top: 22px; margin-top: 28px; font-size: 20px; }
+h3 { font-size: 16px; margin-top: 20px; }
+ul { padding-left: 22px; }
+li { margin: 4px 0; }
+code { background: #f6f8fa; border: 1px solid #d8dee4; border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+pre { overflow: auto; background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 16px; font-size: 12px; line-height: 1.45; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 14px; }
+th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #f6f8fa; font-weight: 600; }
+td:nth-child(3), td:nth-child(4), th:nth-child(3), th:nth-child(4) { text-align: right; white-space: nowrap; }
+.meta { color: #57606a; }
+@media (max-width: 720px) { main { padding: 24px 14px 40px; } table { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Git Diff Report</h1>
+<ul>
+<li>Generated: 2026-07-09 00:41:15 KST</li>
+<li>Repository: <code>/Users/jinwoo/Documents/remem0</code></li>
+<li>Scope: all tracked changes against HEAD</li>
+<li>Command: <code>git diff -M HEAD</code></li>
+</ul>
+<h2>Summary</h2>
+<ul>
+<li>8 tracked file(s) changed, with +380/-9 known line changes.</li>
+<li>Git shortstat: 8 files changed, 380 insertions(+), 9 deletions(-).</li>
+<li>Main areas: <code>src</code>, <code>.</code>, <code>tests</code>.</li>
+<li>Larger patch area: <code>tests/cli.rs</code> (+219/-0).</li>
+<li>Larger patch area: <code>src/main.rs</code> (+56/-2).</li>
+<li>Larger patch area: <code>src/index.rs</code> (+29/-1).</li>
+<li>3 untracked file(s) are present and are not included in the tracked diff.</li>
+</ul>
+<h2>Reviewer Focus</h2>
+<ul>
+<li>No test file changed in this diff scope; verify whether existing tests or manual validation cover the behavior.</li>
+<li>Start with tests/cli.rs; it is the largest changed file in this diff.</li>
+<li>Untracked files are present but not represented in git diff output unless added or reviewed separately.</li>
+</ul>
+<h2>Changed Files</h2>
+<table><tbody>
+<tr><th>File</th><th>Status</th><th>+</th><th>-</th><th>Notes</th></tr>
+<tr><td><code>README.md</code></td><td>Modified</td><td>20</td><td>0</td><td>Modified, docs</td></tr>
+<tr><td><code>src/cli.rs</code></td><td>Modified</td><td>16</td><td>0</td><td>Modified</td></tr>
+<tr><td><code>src/doctor.rs</code></td><td>Modified</td><td>20</td><td>1</td><td>Modified</td></tr>
+<tr><td><code>src/index.rs</code></td><td>Modified</td><td>29</td><td>1</td><td>Modified</td></tr>
+<tr><td><code>src/main.rs</code></td><td>Modified</td><td>56</td><td>2</td><td>Modified</td></tr>
+<tr><td><code>src/search.rs</code></td><td>Modified</td><td>16</td><td>1</td><td>Modified</td></tr>
+<tr><td><code>src/transaction.rs</code></td><td>Modified</td><td>4</td><td>4</td><td>Modified</td></tr>
+<tr><td><code>tests/cli.rs</code></td><td>Modified</td><td>219</td><td>0</td><td>Modified</td></tr>
+</tbody></table>
+<h2>Behavior And Contracts</h2>
+<ul>
+<li>Review the changed files above for public API, CLI, schema, route, config, or user-visible behavior changes.</li>
+<li>This generated report does not infer product intent beyond file names and patch statistics.</li>
+</ul>
+<h2>Validation</h2>
+<ul>
+<li>Not recorded by the reporter. Add test commands and outcomes here before sharing if validation was run.</li>
+<li>No test file was detected in this diff scope.</li>
+</ul>
+<h2>Risks, Assumptions, And Follow-ups</h2>
+<ul>
+<li>No test file changed in this diff scope; verify whether existing tests or manual validation cover the behavior.</li>
+<li>Start with tests/cli.rs; it is the largest changed file in this diff.</li>
+<li>Untracked files are present but not represented in git diff output unless added or reviewed separately.</li>
+</ul>
+<h2>File Details</h2>
+<h3><code>README.md</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +20/-0</li>
+<li>Notes: Modified, docs</li>
+</ul>
+<h3><code>src/cli.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +16/-0</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/doctor.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +20/-1</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/index.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +29/-1</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/main.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +56/-2</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/search.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +16/-1</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/transaction.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +4/-4</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>tests/cli.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +219/-0</li>
+<li>Notes: Modified</li>
+</ul>
+<h2>Untracked Files</h2>
+<ul>
+<li><code>semantic-memory-conflict-review.html</code></li>
+<li><code>src/semantic.rs</code></li>
+<li><code>temporal-graph-primer.html</code></li>
+</ul>
+</main>
+</body>
+</html>

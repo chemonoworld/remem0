@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git Diff Report</title>
+<style>
+body { margin: 0; background: #f6f8fa; color: #24292f; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+main { max-width: 1120px; margin: 0 auto; padding: 32px 24px 56px; background: #ffffff; min-height: 100vh; box-sizing: border-box; }
+h1 { font-size: 28px; margin: 0 0 16px; }
+h2 { border-top: 1px solid #d8dee4; padding-top: 22px; margin-top: 28px; font-size: 20px; }
+h3 { font-size: 16px; margin-top: 20px; }
+ul { padding-left: 22px; }
+li { margin: 4px 0; }
+code { background: #f6f8fa; border: 1px solid #d8dee4; border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+pre { overflow: auto; background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 16px; font-size: 12px; line-height: 1.45; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 14px; }
+th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: #f6f8fa; font-weight: 600; }
+td:nth-child(3), td:nth-child(4), th:nth-child(3), th:nth-child(4) { text-align: right; white-space: nowrap; }
+.meta { color: #57606a; }
+@media (max-width: 720px) { main { padding: 24px 14px 40px; } table { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body>
+<main>
+<h1>rem Action Semantics &amp; Transaction Red-Team Diff</h1>
+<ul>
+<li>Generated: 2026-07-19 01:26:20 KST</li>
+<li>Repository: <code>/Users/jinwoo/Documents/remem0</code></li>
+<li>Scope: all tracked changes against HEAD</li>
+<li>Command: <code>git diff -M HEAD</code></li>
+</ul>
+<h2>Summary</h2>
+<ul>
+<li>12 tracked files changed (+1785/-105) and one required source file, <code>src/review.rs</code> (409 lines), is currently untracked.</li>
+<li>Adds explicit <code>append</code>, read-only <code>review</code>, and provenance-preserving <code>supersede</code> actions. <code>update --append</code> is removed.</li>
+<li>Adds source-event idempotency, deterministic semantic candidate matching, temporal fact lifecycle queries, and duplicate source-identity rejection.</li>
+<li>Serializes vault mutations with <code>.rem/tx/active.lock</code> and extends rollback to successful-but-dirty Git hook commits, including unborn HEAD.</li>
+<li>Hardens frontmatter scalar round-tripping and rejects symlinked vault write directories and policy files.</li>
+</ul>
+<h2>Reviewer Focus</h2>
+<ul>
+<li><strong>Transaction atomicity:</strong> review lock acquisition/release, snapshot rollback order, HEAD restoration, Git staging restoration, and stale-lock recovery in <code>src/transaction.rs</code>.</li>
+<li><strong>Action contract:</strong> verify NoOp → review/Ask → supersede routing across <code>src/main.rs</code>, <code>src/cli.rs</code>, <code>src/memory.rs</code>, and <code>src/review.rs</code>.</li>
+<li><strong>Identity and parsing:</strong> review opaque <code>source_id</code> quoting, strict scalar access, duplicate key handling, and index-level <code>(source, source_id)</code> uniqueness.</li>
+<li><strong>Graph lifecycle:</strong> confirm only active memories participate in current fact queries and superseded memories remain immutable provenance.</li>
+<li><strong>Commit completeness:</strong> <code>src/review.rs</code> must be added with the tracked files; <code>main.rs</code> now imports it.</li>
+</ul>
+<h2>Changed Files</h2>
+<table><tbody>
+<tr><th>File</th><th>Status</th><th>+</th><th>-</th><th>Notes</th></tr>
+<tr><td><code>README.md</code></td><td>Modified</td><td>43</td><td>6</td><td>Modified, docs</td></tr>
+<tr><td><code>src/cli.rs</code></td><td>Modified</td><td>137</td><td>2</td><td>Modified</td></tr>
+<tr><td><code>src/doctor.rs</code></td><td>Modified</td><td>11</td><td>4</td><td>Modified</td></tr>
+<tr><td><code>src/frontmatter.rs</code></td><td>Modified</td><td>184</td><td>25</td><td>Modified</td></tr>
+<tr><td><code>src/index.rs</code></td><td>Modified</td><td>30</td><td>3</td><td>Modified</td></tr>
+<tr><td><code>src/main.rs</code></td><td>Modified</td><td>157</td><td>3</td><td>Modified</td></tr>
+<tr><td><code>src/memory.rs</code></td><td>Modified</td><td>201</td><td>47</td><td>Modified</td></tr>
+<tr><td><code>src/policy.rs</code></td><td>Modified</td><td>17</td><td>4</td><td>Modified, security-sensitive</td></tr>
+<tr><td><code>src/semantic.rs</code></td><td>Modified</td><td>25</td><td>0</td><td>Modified</td></tr>
+<tr><td><code>src/transaction.rs</code></td><td>Modified</td><td>209</td><td>6</td><td>Modified</td></tr>
+<tr><td><code>src/workspace.rs</code></td><td>Modified</td><td>48</td><td>5</td><td>Modified</td></tr>
+<tr><td><code>tests/cli.rs</code></td><td>Modified</td><td>723</td><td>0</td><td>Modified</td></tr>
+<tr><td><code>src/review.rs</code></td><td>Untracked / required</td><td>409</td><td>0</td><td>New review planner and candidate classifier</td></tr>
+</tbody></table>
+<h2>Behavior And Contracts</h2>
+<ul>
+<li><code>add --source X --source-id Y</code> is idempotent for identical bodies and rejects implicit updates. Opaque IDs such as <code>null</code>, list-like values, quotes, and surrounding spaces round-trip exactly.</li>
+<li><code>review</code> never writes. Exact matches return NoOp; explicit targets return Update; same facts return Append; changed exclusive relations return Supersede; compatible or ambiguous candidates return Add.</li>
+<li><code>supersede</code> writes one replacement, marks the old memory superseded, records <code>supersedes</code>, and excludes the old fact from current semantic queries. Explicit metadata overrides prevent an unchanged-body NoOp.</li>
+<li>Every mutating command, dry-run, and rebuild now acquires one vault lock. A competing process fails before writing; stale locks are reported by <code>doctor</code>.</li>
+<li>Reindex diagnostics now reject duplicate source identities and malformed/duplicate frontmatter while preserving the previous SQLite cache on failure.</li>
+<li>Git hooks that leave post-commit vault changes trigger rollback of HEAD, Markdown, SQLite, and staging instead of returning success with a dirty tree.</li>
+</ul>
+<h2>Validation</h2>
+<ul>
+<li><code>cargo test</code>: 39 unit + 78 CLI integration + 2 TUI e2e passed.</li>
+<li><code>cargo test --release</code>: the same 119 tests passed under optimized code.</li>
+<li><code>cargo clippy --all-targets --all-features -- -D warnings</code>, <code>cargo fmt --all -- --check</code>, and <code>git diff --check</code> passed.</li>
+<li>45 paired concurrency rounds passed across debug and installed binaries: exactly one mutation committed per round, no file loss, clean Git state, and no remaining lock/journal.</li>
+<li>Installed <code>/Users/jinwoo/.cargo/bin/rem</code> matches <code>target/release/rem</code>; direct e2e covered NoOp, review, supersede chains, candidate classes, external duplicate identities, BM25 search, and facts.</li>
+<li>Final isolated-vault checks: SQLite <code>integrity_check=ok</code>, diagnostics=0, <code>git fsck --full</code> clean, and <code>rem doctor</code> clean.</li>
+</ul>
+<h2>Risks, Assumptions, And Follow-ups</h2>
+<ul>
+<li><code>src/review.rs</code> is untracked. Omitting it from a commit leaves <code>mod review;</code> unresolved in a fresh checkout.</li>
+<li>Semantic matching is deterministic and fact-directive based. Embeddings, LLM similarity, entity resolution, and automatic temporal closure remain outside this patch.</li>
+<li>The lock is advisory to <code>rem</code> processes. Obsidian or another external writer does not honor it; users must not delete <code>active.lock</code> while a command is running.</li>
+<li>Five pre-existing HTML reports/decks and this generated report are untracked artifacts, not runtime source changes.</li>
+</ul>
+<h2>File Details</h2>
+<h3><code>README.md</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +43/-6</li>
+<li>Notes: Modified, docs</li>
+</ul>
+<h3><code>src/cli.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +137/-2</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/doctor.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +11/-4</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/frontmatter.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +184/-25</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/index.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +30/-3</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/main.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +157/-3</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/memory.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +201/-47</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/policy.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +17/-4</li>
+<li>Notes: Modified, security-sensitive</li>
+</ul>
+<h3><code>src/semantic.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +25/-0</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/transaction.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +209/-6</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>src/workspace.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +48/-5</li>
+<li>Notes: Modified</li>
+</ul>
+<h3><code>tests/cli.rs</code></h3>
+<ul>
+<li>Status: Modified</li>
+<li>Line change: +723/-0</li>
+<li>Notes: Adds action routing, source identity, semantic lifecycle, rollback, Git hook, symlink, stale lock, and concurrent-process coverage.</li>
+</ul>
+<h3><code>src/review.rs</code></h3>
+<ul>
+<li>Status: Untracked / required source</li>
+<li>Size: 409 lines</li>
+<li>Notes: Defines read-only review plans, action choices, exact-body matching, semantic fact candidates, cardinality-aware recommendations, and interactive selection.</li>
+</ul>
+<h2>Untracked Files</h2>
+<ul>
+<li><code>src/review.rs</code> — required implementation source; include in the eventual code commit.</li>
+<li><code>rem-red-team-diff-report.html</code> — this generated review report.</li>
+<li><code>rem-temporal-graph-diff-report.html</code></li>
+<li><code>rem-temporal-graph-implementation-deck.html</code></li>
+<li><code>rem-usage-guide.html</code></li>
+<li><code>semantic-memory-conflict-review.html</code></li>
+<li><code>temporal-graph-primer.html</code></li>
+</ul>
+</main>
+</body>
+</html>
