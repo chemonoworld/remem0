@@ -352,6 +352,7 @@ fn color_policy_styles_human_output_without_breaking_pipes() {
     assert!(piped.status.success());
     let piped = String::from_utf8(piped.stdout).unwrap();
     assert!(piped.contains(&format!("{id}\tlong\tproject\tdecision\tColor Contract")));
+    assert!(!piped.contains("ID\tTYPE\tSCOPE\tKIND\tTITLE"));
     assert!(!piped.contains("\u{1b}["));
 
     let always = project.rem_ok(&["--color", "always", "list"]);

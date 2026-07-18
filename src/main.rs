@@ -136,16 +136,42 @@ fn run() -> Result<()> {
                     include_archived: args.all,
                 },
             )?;
-            for memory in memories {
-                let memory_type = memory.metadata.memory_type.to_string();
-                let title = memory.title();
-                output::line(output::row([
-                    (memory.metadata.id, Tone::Id),
-                    (memory_type.clone(), output::memory_type_tone(&memory_type)),
-                    (memory.metadata.scope.to_string(), Tone::Scope),
-                    (memory.metadata.kind.to_string(), Tone::Kind),
-                    (title, Tone::Title),
-                ]));
+            let rows = memories
+                .into_iter()
+                .map(|memory| {
+                    let memory_type = memory.metadata.memory_type.to_string();
+                    let memory_type_tone = output::memory_type_tone(&memory_type);
+                    let title = memory.title();
+                    [
+                        (memory.metadata.id, Tone::Id),
+                        (memory_type, memory_type_tone),
+                        (memory.metadata.scope.to_string(), Tone::Scope),
+                        (memory.metadata.kind.to_string(), Tone::Kind),
+                        (title, Tone::Title),
+                    ]
+                })
+                .collect::<Vec<_>>();
+
+            if output::stdout_is_terminal() {
+                let headers = ["ID", "TYPE", "SCOPE", "KIND", "TITLE"];
+                let widths = std::array::from_fn(|index| {
+                    rows.iter()
+                        .map(|row| row[index].0.chars().count())
+                        .chain([headers[index].len()])
+                        .max()
+                        .unwrap_or_default()
+                });
+                output::line(output::table_row(
+                    headers.map(|header| (header.to_string(), Tone::Key)),
+                    widths,
+                ));
+                for row in rows {
+                    output::line(output::table_row(row, widths));
+                }
+            } else {
+                for row in rows {
+                    output::line(output::row(row));
+                }
             }
             Ok(())
         }

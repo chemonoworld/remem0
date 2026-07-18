@@ -57,17 +57,25 @@ enum OutputStream {
 
 static STDOUT_COLOR: AtomicBool = AtomicBool::new(false);
 static STDERR_COLOR: AtomicBool = AtomicBool::new(false);
+static STDOUT_IS_TERMINAL: AtomicBool = AtomicBool::new(false);
 
 pub fn configure(choice: ColorChoice) {
+    let stdout_is_terminal = io::stdout().is_terminal();
+    let stderr_is_terminal = io::stderr().is_terminal();
     let (stdout, stderr) = resolve_color(
         choice,
         color_disabled_by_environment(),
         color_forced_by_environment(),
-        io::stdout().is_terminal(),
-        io::stderr().is_terminal(),
+        stdout_is_terminal,
+        stderr_is_terminal,
     );
     STDOUT_COLOR.store(stdout, Ordering::Relaxed);
     STDERR_COLOR.store(stderr, Ordering::Relaxed);
+    STDOUT_IS_TERMINAL.store(stdout_is_terminal, Ordering::Relaxed);
+}
+
+pub fn stdout_is_terminal() -> bool {
+    STDOUT_IS_TERMINAL.load(Ordering::Relaxed)
 }
 
 pub fn line(value: impl fmt::Display) {
@@ -105,6 +113,22 @@ pub fn row<const N: usize>(cells: [(String, Tone); N]) -> String {
         .map(|(value, tone)| paint(value, tone))
         .collect::<Vec<_>>()
         .join("\t")
+}
+
+pub fn table_row<const N: usize>(cells: [(String, Tone); N], widths: [usize; N]) -> String {
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(index, (value, tone))| {
+            let value = if index + 1 == N {
+                value
+            } else {
+                format!("{value:<width$}", width = widths[index])
+            };
+            paint(value, tone)
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 pub fn key_value(key: impl fmt::Display, value: impl fmt::Display, tone: Tone) -> String {
@@ -360,5 +384,20 @@ mod tests {
         assert_eq!(change_tone("modified"), Tone::Warning);
         assert_eq!(action_tone("no-op"), Tone::Warning);
         assert_eq!(action_tone("abort"), Tone::Error);
+    }
+
+    #[test]
+    fn table_rows_pad_columns_before_applying_terminal_spacing() {
+        assert_eq!(
+            table_row(
+                [
+                    ("ID".to_string(), Tone::Key),
+                    ("TYPE".to_string(), Tone::Key),
+                    ("TITLE".to_string(), Tone::Key),
+                ],
+                [8, 6, 5],
+            ),
+            "ID        TYPE    TITLE"
+        );
     }
 }

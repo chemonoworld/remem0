@@ -91,6 +91,25 @@ expect eof
             .output()
             .unwrap()
     }
+
+    fn create_list_fixture(&self) {
+        let vault = self.root.join("vault");
+        fs::create_dir_all(vault.join("memories/short")).unwrap();
+        fs::create_dir_all(&self.rem_home).unwrap();
+        fs::write(
+            self.rem_home.join("config.toml"),
+            format!(
+                "active_profile = \"test\"\ndefault_search = \"auto\"\n\n[[profiles]]\nname = \"test\"\nroot = {:?}\nstorage = \"local\"\n",
+                vault.display().to_string()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            vault.join("memories/short/list-header-id.md"),
+            "---\nid: list-header-id\ntype: short\nscope: project\nkind: decision\nstatus: active\ncreated_at: 1\nupdated_at: 1\ntags: []\n---\n# Header Contract\nA readable list row.\n",
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for TempTuiProject {
@@ -222,4 +241,51 @@ expect eof
         !plain.contains("\u{1b}["),
         "unexpected ANSI output: {plain:?}"
     );
+}
+
+#[test]
+fn list_shows_aligned_column_headers_only_for_a_terminal() {
+    if !expect_is_available() {
+        eprintln!("skipping PTY test because expect is not installed");
+        return;
+    }
+
+    let project = TempTuiProject::new("list-headers");
+    project.create_list_fixture();
+    let output = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) --color never list
+expect eof
+"#,
+    );
+    assert!(output.status.success());
+
+    let output = String::from_utf8_lossy(&output.stdout);
+    let header = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("ID"))
+        .unwrap_or_else(|| panic!("missing list header in PTY output: {output:?}"));
+    let positions =
+        ["ID", "TYPE", "SCOPE", "KIND", "TITLE"].map(|label| header.find(label).unwrap());
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(output.contains("list-header-id"));
+    assert!(output.contains("Header Contract"));
+    assert!(!output.contains('\t'));
+
+    let empty = project.run_expect(
+        r#"
+set timeout 10
+spawn -noecho $env(REM_TUI_BIN) --color never list --long
+expect eof
+"#,
+    );
+    assert!(empty.status.success());
+    let empty = String::from_utf8_lossy(&empty.stdout);
+    assert!(empty.lines().any(|line| {
+        ["ID", "TYPE", "SCOPE", "KIND", "TITLE"]
+            .iter()
+            .all(|label| line.contains(label))
+    }));
+    assert!(!empty.contains("list-header-id"));
 }

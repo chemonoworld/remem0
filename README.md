@@ -77,6 +77,10 @@ reading and search, creating and changing memories, review and maintenance, and
 command help. Existing command names remain available directly, and
 `rem help <command>` shows the detailed options for one command.
 
+When written directly to a terminal, `rem list` prints an aligned
+`ID / TYPE / SCOPE / KIND / TITLE` header. Redirected output remains the
+headerless, tab-separated format used by scripts.
+
 ```sh
 cargo run -- add --short --tag rust $'# Decision\nUse Markdown as canonical memory.'
 cargo run -- list --short
