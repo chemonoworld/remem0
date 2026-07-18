@@ -76,10 +76,17 @@ pub fn run(workspace: &Workspace, _storage: StorageMode) -> Result<Vec<DoctorFin
         }
         Ok(pending) => {
             for path in pending {
-                findings.push(warn(format!(
-                    "pending transaction journal: {}; run `rem commit` after recovery",
-                    path.display()
-                )));
+                if path.file_name().is_some_and(|name| name == "active.lock") {
+                    findings.push(warn(format!(
+                        "transaction lock present: {}; confirm no rem process is running before removing a stale lock",
+                        path.display()
+                    )));
+                } else {
+                    findings.push(warn(format!(
+                        "pending transaction journal: {}; run `rem commit` after recovery",
+                        path.display()
+                    )));
+                }
             }
         }
         Err(err) => findings.push(warn(format!(

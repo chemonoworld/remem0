@@ -162,6 +162,7 @@ pub struct MemoryMetadata {
     pub tags: Vec<String>,
     pub title: Option<String>,
     pub source: Option<String>,
+    pub source_id: Option<String>,
     pub agent: Option<String>,
     pub session: Option<String>,
     pub confidence: Option<String>,
@@ -193,6 +194,7 @@ pub struct CreateMemoryInput {
     tags: Vec<String>,
     body: String,
     source: Option<String>,
+    source_id: Option<String>,
     agent: Option<String>,
     session: Option<String>,
 }
@@ -211,6 +213,7 @@ impl CreateMemoryInput {
             tags: Vec::new(),
             body,
             source: None,
+            source_id: None,
             agent: None,
             session: None,
         }
@@ -226,6 +229,11 @@ impl CreateMemoryInput {
         self
     }
 
+    pub fn source_id(mut self, source_id: Option<String>) -> Self {
+        self.source_id = source_id;
+        self
+    }
+
     pub fn agent(mut self, agent: Option<String>) -> Self {
         self.agent = agent;
         self
@@ -238,9 +246,7 @@ impl CreateMemoryInput {
 }
 
 pub fn create_memory(workspace: &Workspace, input: CreateMemoryInput) -> Result<Memory> {
-    if input.body.trim().is_empty() {
-        return Err(eyre!("memory body cannot be empty"));
-    }
+    validate_create_input(&input)?;
 
     let now = now_string();
     let id = generate_id();
@@ -256,6 +262,7 @@ pub fn create_memory(workspace: &Workspace, input: CreateMemoryInput) -> Result<
             tags: normalize_tags(input.tags),
             title: None,
             source: input.source,
+            source_id: input.source_id,
             agent: input.agent,
             session: input.session,
             confidence: Some("1.0".to_string()),
@@ -316,12 +323,13 @@ pub fn read_memory(path: &Path) -> Result<Memory> {
             created_at: required_scalar(&frontmatter, "created_at")?,
             updated_at: required_scalar(&frontmatter, "updated_at")?,
             tags: frontmatter::get_list(&frontmatter, "tags"),
-            title: frontmatter::get_scalar(&frontmatter, "title"),
-            source: frontmatter::get_scalar(&frontmatter, "source"),
-            agent: frontmatter::get_scalar(&frontmatter, "agent"),
-            session: frontmatter::get_scalar(&frontmatter, "session"),
-            confidence: frontmatter::get_scalar(&frontmatter, "confidence"),
-            promoted_from: frontmatter::get_scalar(&frontmatter, "promoted_from"),
+            title: frontmatter::get_optional_scalar(&frontmatter, "title")?,
+            source: frontmatter::get_optional_scalar(&frontmatter, "source")?,
+            source_id: frontmatter::get_optional_scalar(&frontmatter, "source_id")?,
+            agent: frontmatter::get_optional_scalar(&frontmatter, "agent")?,
+            session: frontmatter::get_optional_scalar(&frontmatter, "session")?,
+            confidence: frontmatter::get_optional_scalar(&frontmatter, "confidence")?,
+            promoted_from: frontmatter::get_optional_scalar(&frontmatter, "promoted_from")?,
             supersedes: frontmatter::get_list(&frontmatter, "supersedes"),
         },
         body,
@@ -344,6 +352,37 @@ pub fn list_memories(workspace: &Workspace, filter: &MemoryFilter) -> Result<Vec
     }
     memories.sort_by(|left, right| left.metadata.id.cmp(&right.metadata.id));
     Ok(memories)
+}
+
+pub fn find_memories_by_source_identity(
+    workspace: &Workspace,
+    source: &str,
+    source_id: &str,
+) -> Result<Vec<Memory>> {
+    if source.trim().is_empty() {
+        return Err(eyre!("memory source cannot be empty"));
+    }
+    if source_id.trim().is_empty() {
+        return Err(eyre!("source_id cannot be empty"));
+    }
+
+    Ok(list_memories(
+        workspace,
+        &MemoryFilter {
+            include_archived: true,
+            ..MemoryFilter::default()
+        },
+    )?
+    .into_iter()
+    .filter(|memory| {
+        memory.metadata.source.as_deref() == Some(source)
+            && memory.metadata.source_id.as_deref() == Some(source_id)
+    })
+    .collect())
+}
+
+pub fn bodies_match(left: &str, right: &str) -> bool {
+    canonical_body(left) == canonical_body(right)
 }
 
 pub fn memory_paths(workspace: &Workspace, include_archived: bool) -> Result<Vec<PathBuf>> {
@@ -419,6 +458,7 @@ pub fn update_memory(
         return Err(eyre!("updated body cannot be empty"));
     }
     let mut memory = find_memory(workspace, id, false)?;
+    ensure_active_memory(&memory, "updated")?;
     let original_path = memory.path.clone();
     memory.body = if append {
         format!("{}\n\n{}", memory.body.trim(), body.trim())
@@ -436,8 +476,78 @@ pub fn update_memory(
     Ok(written)
 }
 
+pub fn supersede_memory(
+    workspace: &Workspace,
+    id: &str,
+    input: CreateMemoryInput,
+) -> Result<(Memory, Memory)> {
+    validate_create_input(&input)?;
+
+    let mut superseded = find_memory(workspace, id, true)?;
+    if superseded.metadata.status != MemoryStatus::Active {
+        return Err(eyre!(
+            "only active memories can be superseded; {} is {}",
+            superseded.metadata.id,
+            superseded.metadata.status
+        ));
+    }
+    if let (Some(source), Some(source_id)) = (input.source.as_deref(), input.source_id.as_deref()) {
+        let matches = find_memories_by_source_identity(workspace, source, source_id)?;
+        if let Some(existing) = matches.first() {
+            let action = if existing.metadata.id == superseded.metadata.id {
+                "use update for the same source event"
+            } else {
+                "use a new source_id"
+            };
+            return Err(eyre!(
+                "replacement source identity {:?}/{} already belongs to memory {}; {action}",
+                source,
+                source_id,
+                existing.metadata.id
+            ));
+        }
+    }
+
+    let now = now_string();
+    let superseded_id = superseded.metadata.id.clone();
+    let replacement = Memory {
+        metadata: MemoryMetadata {
+            id: generate_id(),
+            memory_type: input.memory_type,
+            scope: input.scope,
+            kind: input.kind,
+            status: MemoryStatus::Active,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            tags: normalize_tags(input.tags),
+            title: None,
+            source: input.source,
+            source_id: input.source_id,
+            agent: input.agent,
+            session: input.session,
+            confidence: Some("1.0".to_string()),
+            promoted_from: None,
+            supersedes: vec![superseded_id],
+        },
+        body: input.body,
+        path: None,
+    };
+
+    superseded.metadata.status = MemoryStatus::Superseded;
+    superseded.metadata.updated_at = now;
+    let superseded = write_memory(workspace, &superseded)?;
+    let replacement = write_memory(workspace, &replacement)?;
+    Ok((superseded, replacement))
+}
+
 pub fn delete_memory(workspace: &Workspace, id: &str, hard: bool) -> Result<Memory> {
     let mut memory = find_memory(workspace, id, true)?;
+    if memory.metadata.status == MemoryStatus::Superseded {
+        return Err(eyre!(
+            "superseded memory {} is immutable; keep it to preserve provenance",
+            memory.metadata.id
+        ));
+    }
     let original_path = memory.path.clone();
     if let Some(path) = &original_path {
         ensure_mutable_memory_path(path)?;
@@ -473,12 +583,24 @@ pub fn ensure_mutable_memory_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn ensure_active_memory(memory: &Memory, action: &str) -> Result<()> {
+    if memory.metadata.status != MemoryStatus::Active {
+        return Err(eyre!(
+            "only active memories can be {action}; {} is {}",
+            memory.metadata.id,
+            memory.metadata.status
+        ));
+    }
+    Ok(())
+}
+
 pub fn promote_memory(
     workspace: &Workspace,
     id: &str,
     body_override: Option<String>,
 ) -> Result<Memory> {
     let source = find_memory(workspace, id, false)?;
+    ensure_active_memory(&source, "promoted")?;
     if source.metadata.memory_type != MemoryType::Short {
         return Err(eyre!("only short-term memories can be promoted"));
     }
@@ -497,6 +619,7 @@ pub fn promote_memory(
             tags: source.metadata.tags.clone(),
             title: source.metadata.title.clone(),
             source: Some("promote".to_string()),
+            source_id: None,
             agent: source.metadata.agent.clone(),
             session: source.metadata.session.clone(),
             confidence: source.metadata.confidence.clone(),
@@ -524,7 +647,7 @@ impl Memory {
     }
 
     pub fn to_markdown(&self) -> String {
-        use FieldValue::{List, Scalar};
+        use FieldValue::{List, Null, Scalar};
 
         let mut fields = vec![
             ("id", Scalar(self.metadata.id.clone())),
@@ -537,57 +660,35 @@ impl Memory {
             ("tags", List(self.metadata.tags.clone())),
             (
                 "title",
-                Scalar(
-                    self.metadata
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata.title.clone().map(Scalar).unwrap_or(Null),
             ),
             (
                 "source",
-                Scalar(
-                    self.metadata
-                        .source
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata.source.clone().map(Scalar).unwrap_or(Null),
+            ),
+            (
+                "source_id",
+                self.metadata.source_id.clone().map(Scalar).unwrap_or(Null),
             ),
             (
                 "agent",
-                Scalar(
-                    self.metadata
-                        .agent
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata.agent.clone().map(Scalar).unwrap_or(Null),
             ),
             (
                 "session",
-                Scalar(
-                    self.metadata
-                        .session
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata.session.clone().map(Scalar).unwrap_or(Null),
             ),
             (
                 "confidence",
-                Scalar(
-                    self.metadata
-                        .confidence
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata.confidence.clone().map(Scalar).unwrap_or(Null),
             ),
             (
                 "promoted_from",
-                Scalar(
-                    self.metadata
-                        .promoted_from
-                        .clone()
-                        .unwrap_or_else(|| "null".to_string()),
-                ),
+                self.metadata
+                    .promoted_from
+                    .clone()
+                    .map(Scalar)
+                    .unwrap_or(Null),
             ),
             ("supersedes", List(self.metadata.supersedes.clone())),
         ];
@@ -606,6 +707,14 @@ impl Memory {
         }
         if self.body.trim().is_empty() {
             return Err(eyre!("memory body is required"));
+        }
+        for (field, value) in [
+            ("memory source", self.metadata.source.as_deref()),
+            ("source_id", self.metadata.source_id.as_deref()),
+            ("agent", self.metadata.agent.as_deref()),
+            ("session", self.metadata.session.as_deref()),
+        ] {
+            validate_metadata_scalar(field, value)?;
         }
         Ok(())
     }
@@ -673,7 +782,7 @@ fn is_canonical_path(memory: &Memory, id: &str) -> bool {
 }
 
 fn required_scalar(map: &frontmatter::Frontmatter, key: &str) -> Result<String> {
-    frontmatter::get_scalar(map, key)
+    frontmatter::get_optional_scalar(map, key)?
         .ok_or_else(|| eyre!("missing required frontmatter field {key:?}"))
 }
 
@@ -691,6 +800,43 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     tags.sort();
     tags.dedup();
     tags
+}
+
+fn validate_create_input(input: &CreateMemoryInput) -> Result<()> {
+    if input.body.trim().is_empty() {
+        return Err(eyre!("memory body cannot be empty"));
+    }
+    for (field, value) in [
+        ("memory source", input.source.as_deref()),
+        ("source_id", input.source_id.as_deref()),
+        ("agent", input.agent.as_deref()),
+        ("session", input.session.as_deref()),
+    ] {
+        validate_metadata_scalar(field, value)?;
+    }
+    for tag in &input.tags {
+        if tag.contains(['\n', '\r']) {
+            return Err(eyre!("memory tags must be single-line values"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_scalar(field: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        return Err(eyre!("{field} cannot be empty"));
+    }
+    if value.contains(['\n', '\r']) {
+        return Err(eyre!("{field} must be a single line"));
+    }
+    Ok(())
+}
+
+fn canonical_body(body: &str) -> String {
+    body.replace("\r\n", "\n").trim().to_string()
 }
 
 fn generate_id() -> String {
@@ -743,6 +889,7 @@ mod tests {
                 tags: vec!["rust".to_string()],
                 title: None,
                 source: Some("test".to_string()),
+                source_id: Some("event-1".to_string()),
                 agent: None,
                 session: None,
                 confidence: Some("1.0".to_string()),
@@ -761,5 +908,12 @@ mod tests {
 
         assert_eq!(parsed.metadata.id, "m1");
         assert_eq!(parsed.title(), "Use Markdown");
+        assert_eq!(parsed.metadata.source_id.as_deref(), Some("event-1"));
+    }
+
+    #[test]
+    fn body_matching_ignores_line_endings_and_outer_whitespace() {
+        assert!(bodies_match("# Title\r\nbody\r\n", "# Title\nbody"));
+        assert!(!bodies_match("# Title\nbody", "# Title\nother"));
     }
 }

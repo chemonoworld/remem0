@@ -5,6 +5,7 @@ mod frontmatter;
 mod index;
 mod memory;
 mod policy;
+mod review;
 mod search;
 mod semantic;
 mod transaction;
@@ -39,17 +40,57 @@ fn run() -> Result<()> {
         Command::Profile { command } => run_profile_command(store, command),
         Command::Add(args) => {
             let workspace = active_workspace(&store)?;
+            validate_mutation_workspace(&workspace)?;
             let body = args.body();
             let memory_type = args.resolved_type();
             let scope = args.scope;
             let kind = args.kind;
             let tags = args.tags;
             let source = args.source;
+            let source_id = args.source_id;
             let agent = args.agent;
             let session = args.session;
+            if let Some(source_id) = &source_id {
+                let matches =
+                    memory::find_memories_by_source_identity(&workspace, &source, source_id)?;
+                match matches.len() {
+                    0 => {}
+                    1 => {
+                        let existing = &matches[0];
+                        if existing.metadata.status != memory::MemoryStatus::Active {
+                            return Err(eyre!(
+                                "source identity {:?}/{} belongs to {} memory {}; use an explicit action instead of add",
+                                source,
+                                source_id,
+                                existing.metadata.status,
+                                existing.metadata.id
+                            ));
+                        }
+                        if memory::bodies_match(&existing.body, &body) {
+                            println!("no-op {} reason=source-identity", existing.metadata.id);
+                            return Ok(());
+                        }
+                        return Err(eyre!(
+                            "source identity {:?}/{} already belongs to memory {}; run `rem update {}` to change it",
+                            source,
+                            source_id,
+                            existing.metadata.id,
+                            existing.metadata.id
+                        ));
+                    }
+                    count => {
+                        return Err(eyre!(
+                            "source identity {:?}/{} matches {count} memories; resolve duplicate source_id values before adding",
+                            source,
+                            source_id
+                        ));
+                    }
+                }
+            }
             let input = CreateMemoryInput::new(memory_type, scope, kind, body)
                 .tags(tags)
                 .source(Some(source))
+                .source_id(source_id)
                 .agent(agent)
                 .session(session);
             let (memory, _) = transaction::run_mutation_with_message(
@@ -113,6 +154,7 @@ fn run() -> Result<()> {
                 transaction_options(args.tx)?,
                 || {
                     let memory = memory::find_memory(&workspace, &id, true)?;
+                    memory::ensure_active_memory(&memory, "edited")?;
                     let path = memory
                         .path
                         .ok_or_else(|| eyre!("memory has no filesystem path"))?;
@@ -129,14 +171,21 @@ fn run() -> Result<()> {
         }
         Command::Update(args) => {
             let workspace = active_workspace(&store)?;
+            validate_mutation_workspace(&workspace)?;
             let body = args.body();
             let id = args.id;
-            let append = args.append;
+            let existing = memory::find_memory(&workspace, &id, false)?;
+            memory::ensure_active_memory(&existing, "updated")?;
+            if memory::bodies_match(&existing.body, &body) {
+                println!("no-op {} reason=unchanged-body", existing.metadata.id);
+                return Ok(());
+            }
+            let id = existing.metadata.id;
             let (memory, _) = transaction::run_mutation_with_message(
                 &workspace,
                 transaction_options(args.tx)?,
                 || {
-                    let memory = memory::update_memory(&workspace, &id, body, append)?;
+                    let memory = memory::update_memory(&workspace, &id, body, false)?;
                     Ok((
                         memory.clone(),
                         format!("rem: update memory {}", memory.metadata.id),
@@ -146,6 +195,9 @@ fn run() -> Result<()> {
             println!("updated {}", memory.metadata.id);
             Ok(())
         }
+        Command::Append(args) => run_append(&store, args),
+        Command::Review(args) => run_review(&store, args),
+        Command::Supersede(args) => run_supersede(&store, args),
         Command::Delete(args) => {
             let workspace = active_workspace(&store)?;
             let id = args.id;
@@ -263,7 +315,7 @@ fn run() -> Result<()> {
         }
         Command::Rebuild => {
             let workspace = active_workspace(&store)?;
-            let report = index::rebuild(&workspace)?;
+            let report = transaction::rebuild_index(&workspace)?;
             println!(
                 "rebuilt {} indexed={} diagnostics={} semantic_entities={} semantic_episodes={} semantic_facts={}",
                 report.index_path,
@@ -339,6 +391,104 @@ fn run_init(store: ConfigStore, args: cli::InitArgs) -> Result<()> {
     store.save(&config)?;
 
     println!("initialized {}", workspace.root().display());
+    Ok(())
+}
+
+fn run_review(store: &ConfigStore, args: cli::ReviewArgs) -> Result<()> {
+    let workspace = active_workspace(store)?;
+    let body = args.body();
+    let plan = review::plan(&workspace, args.id.as_deref(), &body, args.scope)?;
+    review::print_plan(&plan);
+
+    let action = if args.non_interactive {
+        plan.suggested_action
+    } else {
+        review::prompt_for_action(&plan)?
+    };
+    if action == review::ReviewAction::Abort {
+        return Err(eyre!("memory review aborted"));
+    }
+
+    println!(
+        "review action={} target={} reason={}",
+        action.label(),
+        plan.target_id().unwrap_or("-"),
+        plan.reason
+    );
+    Ok(())
+}
+
+fn run_append(store: &ConfigStore, args: cli::AppendArgs) -> Result<()> {
+    let workspace = active_workspace(store)?;
+    validate_mutation_workspace(&workspace)?;
+    let body = args.body();
+    let existing = memory::find_memory(&workspace, &args.id, false)?;
+    memory::ensure_active_memory(&existing, "appended")?;
+    let id = existing.metadata.id;
+    let (memory, _) =
+        transaction::run_mutation_with_message(&workspace, transaction_options(args.tx)?, || {
+            let memory = memory::update_memory(&workspace, &id, body, true)?;
+            Ok((
+                memory.clone(),
+                format!("rem: append memory {}", memory.metadata.id),
+            ))
+        })?;
+    println!("appended {}", memory.metadata.id);
+    Ok(())
+}
+
+fn run_supersede(store: &ConfigStore, args: cli::SupersedeArgs) -> Result<()> {
+    let workspace = active_workspace(store)?;
+    validate_mutation_workspace(&workspace)?;
+    let source = memory::find_memory(&workspace, &args.id, true)?;
+    memory::ensure_active_memory(&source, "superseded")?;
+
+    let body = args.body();
+    if memory::bodies_match(&source.body, &body) && !args.has_metadata_overrides() {
+        println!("no-op {} reason=unchanged-body", source.metadata.id);
+        return Ok(());
+    }
+    let memory_type = args.resolved_type(source.metadata.memory_type);
+    let scope = args.scope.unwrap_or(source.metadata.scope);
+    let kind = args.kind.unwrap_or(source.metadata.kind);
+    let tags = if args.tags.is_empty() {
+        source.metadata.tags.clone()
+    } else {
+        args.tags
+    };
+    let new_source = args.source.unwrap_or_else(|| "supersede".to_string());
+    if let Some(source_id) = &args.source_id {
+        let matches = memory::find_memories_by_source_identity(&workspace, &new_source, source_id)?;
+        if let Some(existing) = matches.first() {
+            return Err(eyre!(
+                "source identity {:?}/{} already belongs to memory {}; use an explicit update or a new source_id",
+                new_source,
+                source_id,
+                existing.metadata.id
+            ));
+        }
+    }
+    let input = CreateMemoryInput::new(memory_type, scope, kind, body)
+        .tags(tags)
+        .source(Some(new_source))
+        .source_id(args.source_id)
+        .agent(args.agent.or(source.metadata.agent.clone()))
+        .session(args.session.or(source.metadata.session.clone()));
+    let source_id = source.metadata.id;
+    let ((_, replacement), _) =
+        transaction::run_mutation_with_message(&workspace, transaction_options(args.tx)?, || {
+            workspace.init()?;
+            let (superseded, replacement) =
+                memory::supersede_memory(&workspace, &source_id, input)?;
+            Ok((
+                (superseded, replacement.clone()),
+                format!(
+                    "rem: supersede memory {} with {}",
+                    source_id, replacement.metadata.id
+                ),
+            ))
+        })?;
+    println!("superseded {} with {}", source_id, replacement.metadata.id);
     Ok(())
 }
 
@@ -547,6 +697,10 @@ fn active_profile(store: &ConfigStore) -> Result<(AppConfig, ProfileConfig)> {
 fn active_workspace(store: &ConfigStore) -> Result<Workspace> {
     let (_, profile) = active_profile(store)?;
     Ok(Workspace::new(&profile))
+}
+
+fn validate_mutation_workspace(workspace: &Workspace) -> Result<()> {
+    transaction::validate_git_vault(workspace.root()).map(|_| ())
 }
 
 fn run_editor(editor: &str, path: &Path) -> Result<std::process::ExitStatus> {

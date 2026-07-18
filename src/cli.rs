@@ -40,6 +40,12 @@ pub enum Command {
     Edit(EditArgs),
     #[command(about = "Update a memory body.")]
     Update(UpdateArgs),
+    #[command(about = "Append a follow-up to an existing memory body.")]
+    Append(AppendArgs),
+    #[command(about = "Review a proposed memory action without writing.")]
+    Review(ReviewArgs),
+    #[command(about = "Create a replacement memory and mark an active memory as superseded.")]
+    Supersede(SupersedeArgs),
     #[command(about = "Archive or delete a memory.")]
     Delete(DeleteArgs),
     #[command(about = "Promote a short-term memory to long-term memory.")]
@@ -108,6 +114,8 @@ pub struct MemoryWriteArgs {
     pub tags: Vec<String>,
     #[arg(long, default_value = "cli")]
     pub source: String,
+    #[arg(long)]
+    pub source_id: Option<String>,
     #[arg(long)]
     pub agent: Option<String>,
     #[arg(long)]
@@ -179,8 +187,6 @@ pub struct UpdateArgs {
     #[command(flatten)]
     pub tx: MutationArgs,
     pub id: String,
-    #[arg(long)]
-    pub append: bool,
     #[arg(value_name = "TEXT")]
     pub text: Vec<String>,
 }
@@ -188,6 +194,97 @@ pub struct UpdateArgs {
 impl UpdateArgs {
     pub fn body(&self) -> String {
         self.text.join(" ").trim().to_string()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct AppendArgs {
+    #[command(flatten)]
+    pub tx: MutationArgs,
+    pub id: String,
+    #[arg(value_name = "TEXT")]
+    pub text: Vec<String>,
+}
+
+impl AppendArgs {
+    pub fn body(&self) -> String {
+        self.text.join(" ").trim().to_string()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ReviewArgs {
+    #[arg(long)]
+    pub id: Option<String>,
+    #[arg(long, value_enum, default_value_t = MemoryScope::User)]
+    pub scope: MemoryScope,
+    #[arg(long)]
+    pub non_interactive: bool,
+    #[arg(value_name = "TEXT")]
+    pub text: Vec<String>,
+}
+
+impl ReviewArgs {
+    pub fn body(&self) -> String {
+        self.text.join(" ").trim().to_string()
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SupersedeArgs {
+    #[command(flatten)]
+    pub tx: MutationArgs,
+    pub id: String,
+    #[arg(long, conflicts_with = "long")]
+    pub short: bool,
+    #[arg(long, conflicts_with = "short")]
+    pub long: bool,
+    #[arg(long = "type", value_enum)]
+    pub memory_type: Option<MemoryType>,
+    #[arg(long, value_enum)]
+    pub scope: Option<MemoryScope>,
+    #[arg(long, value_enum)]
+    pub kind: Option<MemoryKind>,
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    #[arg(long)]
+    pub source: Option<String>,
+    #[arg(long)]
+    pub source_id: Option<String>,
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(value_name = "TEXT")]
+    pub text: Vec<String>,
+}
+
+impl SupersedeArgs {
+    pub fn resolved_type(&self, source: MemoryType) -> MemoryType {
+        if self.long {
+            MemoryType::Long
+        } else if self.short {
+            MemoryType::Short
+        } else {
+            self.memory_type.unwrap_or(source)
+        }
+    }
+
+    pub fn body(&self) -> String {
+        self.text.join(" ").trim().to_string()
+    }
+
+    pub fn has_metadata_overrides(&self) -> bool {
+        self.short
+            || self.long
+            || self.memory_type.is_some()
+            || self.scope.is_some()
+            || self.kind.is_some()
+            || !self.tags.is_empty()
+            || self.source.is_some()
+            || self.source_id.is_some()
+            || self.agent.is_some()
+            || self.session.is_some()
     }
 }
 
@@ -335,5 +432,43 @@ impl fmt::Display for ConfigKey {
         };
 
         f.write_str(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn supersede_args() -> SupersedeArgs {
+        SupersedeArgs {
+            tx: MutationArgs::default(),
+            id: "m1".to_string(),
+            short: false,
+            long: false,
+            memory_type: None,
+            scope: None,
+            kind: None,
+            tags: Vec::new(),
+            source: None,
+            source_id: None,
+            agent: None,
+            session: None,
+            text: vec!["same body".to_string()],
+        }
+    }
+
+    #[test]
+    fn supersede_metadata_override_detection_is_explicit() {
+        let mut args = supersede_args();
+        assert!(!args.has_metadata_overrides());
+
+        args.kind = Some(MemoryKind::Decision);
+        assert!(args.has_metadata_overrides());
+        args.kind = None;
+        args.source_id = Some("event-2".to_string());
+        assert!(args.has_metadata_overrides());
+        args.source_id = None;
+        args.tags.push("durable".to_string());
+        assert!(args.has_metadata_overrides());
     }
 }

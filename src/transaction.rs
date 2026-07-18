@@ -9,7 +9,10 @@ use std::{
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 
-use crate::{index, workspace::Workspace};
+use crate::{
+    index,
+    workspace::{self, Workspace},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalChangePolicy {
@@ -180,7 +183,9 @@ pub fn run_mutation_with_message<T>(
 
 pub fn dry_run(workspace: &Workspace) -> Result<DryRunReport> {
     validate_git_vault(workspace.root())?;
-    fail_if_pending_transactions(workspace)?;
+    let _lock = TransactionLock::acquire(workspace)?;
+    fail_if_pending_transaction_journals(workspace)?;
+    workspace.ensure_layout()?;
     validate_gitignore_path(workspace)?;
 
     let changed_paths = git_status(workspace.root())?
@@ -201,6 +206,14 @@ pub fn dry_run(workspace: &Workspace) -> Result<DryRunReport> {
         indexed: report.indexed,
         diagnostics: report.diagnostics,
     })
+}
+
+pub fn rebuild_index(workspace: &Workspace) -> Result<index::RebuildReport> {
+    validate_git_vault(workspace.root())?;
+    let _lock = TransactionLock::acquire(workspace)?;
+    fail_if_pending_transaction_journals(workspace)?;
+    workspace.ensure_layout()?;
+    index::rebuild(workspace)
 }
 
 pub fn validate_git_vault(root: &Path) -> Result<GitInfo> {
@@ -254,7 +267,7 @@ pub fn pending_transactions(workspace: &Workspace) -> Result<Vec<PathBuf>> {
         fs::read_dir(&tx_dir).wrap_err_with(|| format!("failed to read {}", tx_dir.display()))?
     {
         let path = entry?.path();
-        if path.is_dir() {
+        if path.is_dir() || path.file_name().is_some_and(|name| name == "active.lock") {
             pending.push(path);
         }
     }
@@ -350,7 +363,85 @@ pub struct GitInfo {
 }
 
 #[derive(Debug)]
+struct TransactionLock {
+    path: PathBuf,
+    owner: String,
+    released: bool,
+}
+
+impl TransactionLock {
+    fn acquire(workspace: &Workspace) -> Result<Self> {
+        ensure_transaction_root(workspace)?;
+        let path = workspace.tx_dir().join("active.lock");
+        let owner = tx_id();
+        let mut file = match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(eyre!(
+                    "another rem transaction is active or a stale lock remains at {}; run `rem doctor` and remove the lock only after confirming no rem process is running",
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                return Err(err).wrap_err_with(|| {
+                    format!("failed to acquire transaction lock {}", path.display())
+                });
+            }
+        };
+
+        let mut lock = Self {
+            path,
+            owner,
+            released: false,
+        };
+        if let Err(err) = writeln!(file, "{}", lock.owner).and_then(|_| file.sync_all()) {
+            let _ = lock.release();
+            return Err(err).wrap_err("failed to persist transaction lock ownership");
+        }
+        Ok(lock)
+    }
+
+    fn release(&mut self) -> Result<()> {
+        if self.released {
+            return Ok(());
+        }
+        match fs::read_to_string(&self.path) {
+            Ok(owner) if owner.trim() == self.owner => {
+                fs::remove_file(&self.path).wrap_err_with(|| {
+                    format!("failed to release transaction lock {}", self.path.display())
+                })?;
+            }
+            Ok(_) => {
+                return Err(eyre!(
+                    "transaction lock ownership changed at {}; refusing to remove another process's lock",
+                    self.path.display()
+                ));
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).wrap_err_with(|| {
+                    format!("failed to inspect transaction lock {}", self.path.display())
+                });
+            }
+        }
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionLock {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
+#[derive(Debug)]
 struct Transaction {
+    lock: TransactionLock,
     workspace: Workspace,
     tx_dir: PathBuf,
     snapshot_dir: PathBuf,
@@ -358,13 +449,18 @@ struct Transaction {
     index_snapshot: Option<PathBuf>,
     staging_snapshot: Option<PathBuf>,
     temp_index: Option<PathBuf>,
+    head_before: Option<String>,
+    symbolic_head_before: Option<String>,
+    commit_created: bool,
     finished: bool,
 }
 
 impl Transaction {
     fn begin(workspace: &Workspace, options: TransactionOptions) -> Result<Self> {
         validate_git_vault(workspace.root())?;
-        fail_if_pending_transactions(workspace)?;
+        let lock = TransactionLock::acquire(workspace)?;
+        fail_if_pending_transaction_journals(workspace)?;
+        workspace.ensure_layout()?;
 
         let external = git_status(workspace.root())?;
         resolve_external_changes(workspace.root(), &external, options)?;
@@ -378,8 +474,11 @@ impl Transaction {
         let snapshot_files = snapshot_vault(workspace.root(), &snapshot_dir)?;
         let index_snapshot = snapshot_index(workspace, &tx_dir)?;
         let staging_snapshot = snapshot_staging(workspace.root(), &tx_dir)?;
+        let head_before = current_head(workspace.root())?;
+        let symbolic_head_before = symbolic_head(workspace.root())?;
 
         Ok(Self {
+            lock,
             workspace: workspace.clone(),
             tx_dir,
             snapshot_dir,
@@ -387,6 +486,9 @@ impl Transaction {
             index_snapshot,
             staging_snapshot,
             temp_index: None,
+            head_before,
+            symbolic_head_before,
+            commit_created: false,
             finished: false,
         })
     }
@@ -462,8 +564,22 @@ impl Transaction {
                 message,
             ],
         )?;
+        let head_after = current_head(self.workspace.root())?;
+        self.commit_created = head_after != self.head_before;
         if !output.status.success() {
             return Err(git_error("git commit", &output));
+        }
+
+        let remaining = git_status(self.workspace.root())?;
+        if !remaining.is_empty() {
+            let paths = remaining
+                .iter()
+                .map(GitStatusEntry::display_path)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(eyre!(
+                "Git hooks changed vault files after commit ({paths}); transaction will roll back"
+            ));
         }
 
         let commit_id = git_stdout(self.workspace.root(), &["rev-parse", "--short", "HEAD"])?
@@ -480,6 +596,9 @@ impl Transaction {
     fn rollback(&mut self) -> Result<()> {
         let mut first_error = None;
 
+        if let Err(err) = self.restore_head() {
+            first_error.get_or_insert(err);
+        }
         if let Err(err) = unstage_all(self.workspace.root()) {
             first_error.get_or_insert(err);
         }
@@ -511,6 +630,37 @@ impl Transaction {
         } else {
             Ok(())
         }
+    }
+
+    fn restore_head(&mut self) -> Result<()> {
+        if !self.commit_created {
+            return Ok(());
+        }
+
+        if let Some(head) = &self.head_before {
+            git_checked(
+                self.workspace.root(),
+                &["reset", "--mixed", head],
+                "git reset transaction commit",
+            )?;
+        } else {
+            let reference = self
+                .symbolic_head_before
+                .as_deref()
+                .ok_or_else(|| eyre!("cannot restore unborn Git HEAD without a symbolic branch"))?;
+            git_checked(
+                self.workspace.root(),
+                &["update-ref", "-d", reference],
+                "git delete transaction commit",
+            )?;
+            git_checked(
+                self.workspace.root(),
+                &["read-tree", "--empty"],
+                "git restore unborn index",
+            )?;
+        }
+        self.commit_created = false;
+        Ok(())
     }
 
     fn restore_index(&self) -> Result<()> {
@@ -557,6 +707,7 @@ impl Transaction {
             fs::remove_dir_all(&self.tx_dir)
                 .wrap_err_with(|| format!("failed to remove {}", self.tx_dir.display()))?;
         }
+        self.lock.release()?;
         self.finished = true;
         Ok(())
     }
@@ -1017,8 +1168,8 @@ fn unstage_all(root: &Path) -> Result<()> {
     }
 }
 
-fn fail_if_pending_transactions(workspace: &Workspace) -> Result<()> {
-    let pending = pending_transactions(workspace)?;
+fn fail_if_pending_transaction_journals(workspace: &Workspace) -> Result<()> {
+    let pending = pending_transaction_journals(workspace)?;
     if pending.is_empty() {
         return Ok(());
     }
@@ -1032,6 +1183,30 @@ fn fail_if_pending_transactions(workspace: &Workspace) -> Result<()> {
         "transaction recovery pending in {}; inspect or remove stale journals before committing",
         paths
     ))
+}
+
+fn pending_transaction_journals(workspace: &Workspace) -> Result<Vec<PathBuf>> {
+    let tx_dir = workspace.tx_dir();
+    if !tx_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut pending = Vec::new();
+    for entry in
+        fs::read_dir(&tx_dir).wrap_err_with(|| format!("failed to read {}", tx_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() {
+            pending.push(path);
+        }
+    }
+    pending.sort();
+    Ok(pending)
+}
+
+fn ensure_transaction_root(workspace: &Workspace) -> Result<()> {
+    workspace::ensure_regular_directory(&workspace.rem_dir(), "rem metadata")?;
+    workspace::ensure_regular_directory(&workspace.tx_dir(), "transaction")
 }
 
 fn gitignore_has_entry(raw: &str, entry: &str) -> bool {
@@ -1121,6 +1296,34 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
         return Err(git_error(&format!("git {}", args.join(" ")), &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn current_head(root: &Path) -> Result<Option<String>> {
+    let output = git_output(root, &["rev-parse", "--verify", "--quiet", "HEAD"])?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(git_error("git rev-parse HEAD", &output))
+    }
+}
+
+fn symbolic_head(root: &Path) -> Result<Option<String>> {
+    let output = git_output(root, &["symbolic-ref", "--quiet", "HEAD"])?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(git_error("git symbolic-ref HEAD", &output))
+    }
 }
 
 fn git_checked(root: &Path, args: &[&str], label: &str) -> Result<()> {

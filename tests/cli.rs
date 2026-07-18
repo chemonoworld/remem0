@@ -3,6 +3,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::{Arc, Barrier},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1022,6 +1024,74 @@ fn git_commit_failure_rolls_back_markdown_and_index() {
     assert_git_clean(&project);
 }
 
+#[cfg(unix)]
+#[test]
+fn successful_hook_worktree_mutation_rolls_back_commit_markdown_and_index() {
+    let project = TempProject::new("git-hook-dirty-rollback");
+    project.init_rem("local");
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'hook mutation\\n' > hook-output.md\nexit 0\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let error = project.rem_err(&["add", "--short", "# Hook mutation\nrollback all state"]);
+    assert!(error.contains("Git hooks changed vault files after commit"));
+    assert_eq!(project.head(), head);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+    assert_eq!(memory_file_count(&project.vault), 0);
+    assert!(!project.vault.join("hook-output.md").exists());
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_hook_mutation_during_initial_commit_restores_unborn_head() {
+    let project = TempProject::new("git-hook-unborn-rollback");
+    project.init_git_vault();
+    let hook = project.vault.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'hook mutation\\n' > hook-output.md\nexit 0\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook, permissions).unwrap();
+
+    let error = project.rem_err(&[
+        "init",
+        "--root",
+        path_str(&project.vault),
+        "--storage",
+        "local",
+    ]);
+    assert!(error.contains("Git hooks changed vault files after commit"));
+    assert!(
+        !TempProject::git_in(&["rev-parse", "--verify", "HEAD"], &project.vault)
+            .status
+            .success()
+    );
+    assert!(!project.vault.join("hook-output.md").exists());
+    assert!(!project.vault.join(".gitignore").exists());
+    assert_git_clean(&project);
+    assert!(
+        project
+            .rem_ok(&["doctor"])
+            .contains("no profiles configured")
+    );
+}
+
 #[test]
 fn git_commit_failure_restores_preexisting_staged_changes() {
     let project = TempProject::new("git-rollback-staging");
@@ -1592,6 +1662,28 @@ fn mutations_refuse_symlinked_memory_files() {
 
 #[cfg(unix)]
 #[test]
+fn mutations_refuse_symlinked_vault_directories() {
+    let project = TempProject::new("symlinked-vault-directory");
+    project.init_rem("local");
+    let short_dir = project.vault.join("memories/short");
+    let outside = project.root.join("outside-short");
+    fs::remove_dir(&short_dir).unwrap();
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, &short_dir).unwrap();
+    let head = project.head();
+
+    let error = project.rem_err(&["add", "# Blocked\nno writes through directory links"]);
+    assert!(error.contains("refusing to use symlinked vault directory"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+    fs::remove_file(&short_dir).unwrap();
+    fs::create_dir(&short_dir).unwrap();
+    assert_git_clean(&project);
+}
+
+#[cfg(unix)]
+#[test]
 fn mutations_refuse_symlinked_gitignore() {
     let project = TempProject::new("symlinked-gitignore");
     project.init_rem("local");
@@ -1617,6 +1709,637 @@ fn mutations_refuse_symlinked_gitignore() {
     );
     assert_eq!(fs::read_to_string(&target).unwrap(), original);
     assert_git_clean(&project);
+}
+
+#[test]
+fn add_source_identity_is_idempotent_and_requires_explicit_update() {
+    let project = TempProject::new("source-identity");
+    project.init_rem("local");
+
+    let first = project.rem_ok(&[
+        "add",
+        "--short",
+        "--source",
+        "codex",
+        "--source-id",
+        "conversation-42",
+        "# Original\nsame event",
+    ]);
+    let id = first.split_whitespace().last().unwrap().to_string();
+    let first_head = project.head();
+
+    let no_op = project.rem_ok(&[
+        "add",
+        "--short",
+        "--source",
+        "codex",
+        "--source-id",
+        "conversation-42",
+        "# Original\nsame event\n",
+    ]);
+    assert!(no_op.contains(&format!("no-op {id} reason=source-identity")));
+    assert_eq!(project.head(), first_head);
+    assert_git_clean(&project);
+
+    let conflicting = project.rem_err(&[
+        "add",
+        "--short",
+        "--source",
+        "codex",
+        "--source-id",
+        "conversation-42",
+        "# Changed\nsame event was edited",
+    ]);
+    assert!(conflicting.contains(&format!("rem update {id}")));
+    assert_eq!(project.head(), first_head);
+    assert_git_clean(&project);
+
+    let updated = project.rem_ok(&["update", &id, "# Changed\nsame event was edited"]);
+    assert!(updated.contains(&format!("updated {id}")));
+    let updated_head = project.head();
+    assert_ne!(updated_head, first_head);
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: update memory {id}")
+    );
+
+    let shown = project.rem_ok(&["show", &id]);
+    assert!(shown.contains("source_id: conversation-42"));
+    assert!(shown.contains("# Changed\nsame event was edited"));
+
+    let unchanged = project.rem_ok(&["update", &id, "# Changed\nsame event was edited\n"]);
+    assert!(unchanged.contains(&format!("no-op {id} reason=unchanged-body")));
+    assert_eq!(project.head(), updated_head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn review_is_read_only_and_returns_an_explicit_action_choice() {
+    let project = TempProject::new("review");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&["add", "--short", "# Original\nkeep this body"]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let head = project.head();
+
+    let review = project.rem_ok_with_stdin(
+        &[
+            "review",
+            "--id",
+            &id,
+            "# Replacement\nchoose but do not write",
+        ],
+        "update\n",
+    );
+    assert!(review.contains(&format!("candidate id={id}")));
+    assert!(review.contains(&format!(
+        "review action=update target={id} reason=explicit-target"
+    )));
+    assert_eq!(project.head(), head);
+    assert_git_clean(&project);
+    let shown = project.rem_ok(&["show", &id]);
+    assert!(shown.contains("# Original\nkeep this body"));
+
+    let no_op = project.rem_ok(&["review", "--id", &id, "# Original\nkeep this body"]);
+    assert!(no_op.contains(&format!(
+        "review action=no-op target={id} reason=unchanged-body"
+    )));
+    assert_eq!(project.head(), head);
+
+    let add = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# Unrelated\nproposed memory",
+    ]);
+    assert!(add.contains("review action=add target=- reason=no-explicit-target"));
+    assert_eq!(project.head(), head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_review_recommends_explicit_actions_without_writing() {
+    let project = TempProject::new("semantic-review");
+    project.init_rem("local");
+
+    let preferred = project.rem_ok(&[
+        "add",
+        "--long",
+        "--kind",
+        "preference",
+        "# Preferred editor\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    let preferred_id = preferred.split_whitespace().last().unwrap().to_string();
+    let initial_head = project.head();
+
+    let exact_body = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# Preferred editor\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    assert!(exact_body.contains(&format!(
+        "review action=no-op target={preferred_id} reason=matching-body"
+    )));
+    assert_eq!(project.head(), initial_head);
+
+    let exclusive = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# Changed editor\n@fact user | prefers | Helix | valid_from=2020-01-01",
+    ]);
+    assert!(exclusive.contains(&format!("candidate id={preferred_id}")));
+    assert!(exclusive.contains(&format!(
+        "candidate semantic id={preferred_id} suggested=supersede reason=semantic-exclusive-conflict"
+    )));
+    assert!(exclusive.contains(&format!(
+        "review action=supersede target={preferred_id} reason=semantic-exclusive-conflict"
+    )));
+    assert_eq!(project.head(), initial_head);
+    assert_git_clean(&project);
+
+    let same_fact = project.rem_ok_with_stdin(
+        &[
+            "review",
+            "# More editor context\n@fact User | PREFERS | vim | valid_from=2020-01-01",
+        ],
+        "append\n",
+    );
+    assert!(same_fact.contains(&format!(
+        "review action=append target={preferred_id} reason=semantic-same-fact"
+    )));
+    assert_eq!(project.head(), initial_head);
+    assert_git_clean(&project);
+
+    let tool = project.rem_ok(&[
+        "add",
+        "--long",
+        "# Existing tool\n@fact User | USES | Git | valid_from=2020-01-01",
+    ]);
+    let tool_id = tool.split_whitespace().last().unwrap().to_string();
+    let compatible_head = project.head();
+    let compatible = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# Another tool\n@fact User | USES | SQLite | valid_from=2020-01-01",
+    ]);
+    assert!(compatible.contains(&format!(
+        "candidate semantic id={tool_id} suggested=add reason=semantic-compatible-fact"
+    )));
+    assert!(compatible.contains(&format!(
+        "review action=add target={tool_id} reason=semantic-compatible-fact"
+    )));
+    assert_eq!(project.head(), compatible_head);
+    assert_git_clean(&project);
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "# Other preference\n@fact User | PREFERS | Emacs | valid_from=2020-01-01",
+    ]);
+    let ambiguous_head = project.head();
+    let ambiguous = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# New preference\n@fact User | PREFERS | Neovim | valid_from=2020-01-01",
+    ]);
+    assert!(ambiguous.contains("candidate none"));
+    assert!(ambiguous.contains("candidate semantic"));
+    assert!(ambiguous.contains("review action=add target=- reason=ambiguous-semantic-candidates"));
+    assert_eq!(project.head(), ambiguous_head);
+    assert_git_clean(&project);
+
+    project.rem_ok(&[
+        "add",
+        "--long",
+        "--scope",
+        "project",
+        "# Former employer\n@fact User | WORKS_AT | OldCo | valid_from=2000-01-01 | valid_to=2001-01-01",
+    ]);
+    let temporal_head = project.head();
+    let expired = project.rem_ok(&[
+        "review",
+        "--scope",
+        "project",
+        "--non-interactive",
+        "# Current employer\n@fact User | WORKS_AT | NewCo | valid_from=2020-01-01",
+    ]);
+    assert!(expired.contains("candidate none"));
+    assert!(expired.contains("review action=add target=- reason=no-explicit-target"));
+    assert_eq!(project.head(), temporal_head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn semantic_review_uses_only_the_active_side_of_a_supersede_chain() {
+    let project = TempProject::new("semantic-review-supersede-chain");
+    project.init_rem("local");
+
+    let old = project.rem_ok(&[
+        "add",
+        "--long",
+        "--kind",
+        "preference",
+        "# Old editor\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    let old_id = old.split_whitespace().last().unwrap().to_string();
+    let replacement_body = "# Current editor\n@fact User | PREFERS | Helix | valid_from=2020-01-01";
+    let superseded = project.rem_ok(&["supersede", &old_id, replacement_body]);
+    let replacement_id = superseded
+        .trim()
+        .strip_prefix(&format!("superseded {old_id} with "))
+        .unwrap()
+        .to_string();
+    let head = project.head();
+
+    let proposal = project.rem_ok(&[
+        "review",
+        "--non-interactive",
+        "# Return to Vim\n@fact User | PREFERS | Vim | valid_from=2020-01-01",
+    ]);
+    assert!(proposal.contains(&format!("candidate id={replacement_id}")));
+    assert!(!proposal.contains(&format!("candidate id={old_id}")));
+    assert!(proposal.contains(&format!(
+        "review action=supersede target={replacement_id} reason=semantic-exclusive-conflict"
+    )));
+
+    let facts = project.rem_ok(&["facts", "--relation", "PREFERS"]);
+    assert!(facts.contains(&replacement_id));
+    assert!(!facts.contains(&old_id));
+    assert_eq!(project.head(), head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn append_and_supersede_are_explicit_and_preserve_provenance() {
+    let project = TempProject::new("append-supersede");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--long",
+        "--kind",
+        "preference",
+        "--source",
+        "codex",
+        "--source-id",
+        "event-1",
+        "--agent",
+        "codex",
+        "--session",
+        "run-1",
+        "# Preferred editor\nUse Vim for terminal work.",
+    ]);
+    let old_id = added.split_whitespace().last().unwrap().to_string();
+
+    let appended = project.rem_ok(&[
+        "append",
+        &old_id,
+        "Keep the configuration portable across machines.",
+    ]);
+    assert!(appended.contains(&format!("appended {old_id}")));
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: append memory {old_id}")
+    );
+    let after_append = project.head();
+    let appended_memory = project.rem_ok(&["show", &old_id]);
+    assert!(appended_memory.contains("Use Vim for terminal work.\n\nKeep the configuration"));
+
+    let same_source = project.rem_err(&[
+        "supersede",
+        &old_id,
+        "--source",
+        "codex",
+        "--source-id",
+        "event-1",
+        "# Preferred editor\nUse Helix for terminal work.",
+    ]);
+    assert!(same_source.contains("source identity"));
+    assert_eq!(project.head(), after_append);
+    assert_git_clean(&project);
+
+    let replacement_body = "# Preferred editor\nUse Helix for terminal work.";
+    let superseded = project.rem_ok(&[
+        "supersede",
+        &old_id,
+        "--source",
+        "codex",
+        "--source-id",
+        "event-2",
+        replacement_body,
+    ]);
+    let replacement_id = superseded
+        .trim()
+        .strip_prefix(&format!("superseded {old_id} with "))
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement_id, old_id);
+    assert_eq!(
+        project.last_commit_subject(),
+        format!("rem: supersede memory {old_id} with {replacement_id}")
+    );
+
+    let old = project.rem_ok(&["show", &old_id]);
+    assert!(old.contains("status: superseded"));
+    assert!(old.contains("source_id: event-1"));
+    let replacement = project.rem_ok(&["show", &replacement_id]);
+    assert!(replacement.contains("status: active"));
+    assert!(replacement.contains("source_id: event-2"));
+    assert!(replacement.contains("agent: codex"));
+    assert!(replacement.contains("session: run-1"));
+    assert!(replacement.contains(&format!("supersedes: [{old_id}]")));
+
+    let listed = project.rem_ok(&["list", "--long"]);
+    assert!(listed.contains(&replacement_id));
+    assert!(!listed.contains(&old_id));
+
+    let update = project.rem_err(&["update", &old_id, "# Mutated\nnot allowed"]);
+    assert!(update.contains("only active memories can be updated"));
+    let append = project.rem_err(&["append", &old_id, "not allowed"]);
+    assert!(append.contains("only active memories can be appended"));
+    project.rem_ok(&["config", "set", "editor", "false"]);
+    let edit = project.rem_err(&["edit", &old_id]);
+    assert!(edit.contains("only active memories can be edited"));
+    let promote = project.rem_err(&["promote", &old_id]);
+    assert!(promote.contains("only active memories can be promoted"));
+    let delete = project.rem_err(&["delete", "--hard", &old_id]);
+    assert!(delete.contains("superseded memory"));
+
+    let replacement_head = project.head();
+    let no_op = project.rem_ok(&["supersede", &replacement_id, replacement_body]);
+    assert!(no_op.contains(&format!("no-op {replacement_id} reason=unchanged-body")));
+    assert_eq!(project.head(), replacement_head);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn supersede_rolls_back_if_reindex_rejects_the_replacement() {
+    let project = TempProject::new("supersede-rollback");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--long",
+        "# Stable preference\n@fact User | PREFERS | Vim | valid_from=2025-01-01",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    let head = project.head();
+    let index_before = fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap();
+
+    let error = project.rem_err(&[
+        "supersede",
+        &id,
+        "# Invalid replacement\n@fact User | LOVES | Broken",
+    ]);
+    assert!(error.contains("unsupported semantic relation"));
+    assert_eq!(project.head(), head);
+    assert_eq!(memory_file_count(&project.vault), 1);
+    assert_eq!(
+        fs::read(project.vault.join(".rem/cache/index.sqlite")).unwrap(),
+        index_before
+    );
+    let original = project.rem_ok(&["show", &id]);
+    assert!(original.contains("status: active"));
+    assert!(original.contains("PREFERS | Vim"));
+    assert_git_clean(&project);
+}
+
+#[test]
+fn no_op_mutations_still_require_a_valid_git_vault() {
+    let project = TempProject::new("no-op-git-validation");
+    project.init_rem("local");
+
+    let added = project.rem_ok(&[
+        "add",
+        "--source",
+        "codex",
+        "--source-id",
+        "event-1",
+        "# Stable\nunchanged body",
+    ]);
+    let id = added.split_whitespace().last().unwrap().to_string();
+    fs::rename(
+        project.vault.join(".git"),
+        project.vault.join(".git-disabled"),
+    )
+    .unwrap();
+
+    let add = project.rem_err(&[
+        "add",
+        "--source",
+        "codex",
+        "--source-id",
+        "event-1",
+        "# Stable\nunchanged body",
+    ]);
+    assert!(add.contains("not a Git repository"));
+    let update = project.rem_err(&["update", &id, "# Stable\nunchanged body"]);
+    assert!(update.contains("not a Git repository"));
+    let supersede = project.rem_err(&["supersede", &id, "# Stable\nunchanged body"]);
+    assert!(supersede.contains("not a Git repository"));
+}
+
+#[test]
+fn metadata_scalars_reject_multiline_frontmatter_injection() {
+    let project = TempProject::new("metadata-scalar-validation");
+    project.init_rem("local");
+    let head = project.head();
+
+    let source_id = project.rem_err(&[
+        "add",
+        "--source-id",
+        "event-1\nstatus: archived",
+        "# Blocked\nno frontmatter injection",
+    ]);
+    assert!(source_id.contains("source_id must be a single line"));
+    let tag = project.rem_err(&[
+        "add",
+        "--tag",
+        "safe\nstatus: archived",
+        "# Blocked\nno frontmatter injection",
+    ]);
+    assert!(tag.contains("memory tags must be single-line values"));
+    assert_eq!(project.head(), head);
+    assert_eq!(memory_file_count(&project.vault), 0);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn source_identity_scalars_round_trip_without_aliasing_special_values() {
+    let project = TempProject::new("source-identity-round-trip");
+    project.init_rem("local");
+
+    for (index, source_id) in ["null", "[event,1]", "\"quoted\"", " event "]
+        .into_iter()
+        .enumerate()
+    {
+        let body = format!("# Event {index}\nopaque source identity");
+        let added = project.rem_ok(&["add", "--source", "codex", "--source-id", source_id, &body]);
+        let id = added.split_whitespace().last().unwrap().to_string();
+        let shown = project.rem_ok(&["show", &id]);
+        let rendered_source_id = match source_id {
+            "null" => "source_id: \"null\"",
+            "[event,1]" => "source_id: \"[event,1]\"",
+            "\"quoted\"" => "source_id: \"\\\"quoted\\\"\"",
+            " event " => "source_id: \" event \"",
+            _ => unreachable!(),
+        };
+        assert!(shown.contains(rendered_source_id));
+
+        let no_op = project.rem_ok(&["add", "--source", "codex", "--source-id", source_id, &body]);
+        assert!(no_op.contains(&format!("no-op {id} reason=source-identity")));
+    }
+
+    assert_eq!(memory_file_count(&project.vault), 4);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn external_duplicate_source_identity_blocks_commit_and_preserves_state() {
+    let project = TempProject::new("duplicate-source-identity");
+    project.init_rem("local");
+    project.rem_ok(&[
+        "add",
+        "--source",
+        "codex",
+        "--source-id",
+        "event-a",
+        "# First\nsource event",
+    ]);
+    project.rem_ok(&[
+        "add",
+        "--source",
+        "codex",
+        "--source-id",
+        "event-b",
+        "# Second\nsource event",
+    ]);
+    let head = project.head();
+    let index_path = project.vault.join(".rem/cache/index.sqlite");
+    let index_before = fs::read(&index_path).unwrap();
+    let second = memory_files(&project.vault)
+        .into_iter()
+        .find(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("source_id: event-b")
+        })
+        .unwrap();
+    let raw = fs::read_to_string(&second)
+        .unwrap()
+        .replace("source_id: event-b", "source_id: event-a");
+    fs::write(&second, raw).unwrap();
+
+    let error = project.rem_err(&["commit", "--non-interactive", "--accept-external"]);
+    assert!(error.contains("duplicate source identity"));
+    assert_eq!(project.head(), head);
+    assert_eq!(fs::read(&index_path).unwrap(), index_before);
+    assert!(
+        fs::read_to_string(&second)
+            .unwrap()
+            .contains("source_id: event-a")
+    );
+    assert!(project.status_short().contains(" M memories/"));
+}
+
+#[test]
+fn supersede_same_body_honors_explicit_metadata_overrides() {
+    let project = TempProject::new("supersede-metadata-override");
+    project.init_rem("local");
+    let body = "# Stable body\nmetadata changed explicitly";
+    let added = project.rem_ok(&["add", "--kind", "note", body]);
+    let old_id = added.split_whitespace().last().unwrap().to_string();
+
+    let output = project.rem_ok(&["supersede", "--kind", "decision", &old_id, body]);
+    let replacement_id = output
+        .trim()
+        .strip_prefix(&format!("superseded {old_id} with "))
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement_id, old_id);
+    assert!(
+        project
+            .rem_ok(&["show", &old_id])
+            .contains("status: superseded")
+    );
+    let replacement = project.rem_ok(&["show", &replacement_id]);
+    assert!(replacement.contains("kind: decision"));
+    assert!(replacement.contains(body));
+    assert_eq!(memory_file_count(&project.vault), 2);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn stale_transaction_lock_blocks_mutation_and_is_reported_by_doctor() {
+    let project = TempProject::new("stale-transaction-lock");
+    project.init_rem("local");
+    let lock = project.vault.join(".rem/tx/active.lock");
+    fs::write(&lock, "stale-owner\n").unwrap();
+    let head = project.head();
+
+    let error = project.rem_err(&["add", "# Blocked\ntransaction is locked"]);
+    assert!(error.contains("another rem transaction is active or a stale lock remains"));
+    let dry_run = project.rem_err(&["commit", "--dry-run"]);
+    assert!(dry_run.contains("another rem transaction is active or a stale lock remains"));
+    let rebuild = project.rem_err(&["rebuild"]);
+    assert!(rebuild.contains("another rem transaction is active or a stale lock remains"));
+    assert_eq!(project.head(), head);
+    assert_eq!(memory_file_count(&project.vault), 0);
+    let doctor = project.rem_ok(&["doctor"]);
+    assert!(doctor.contains("transaction lock present"));
+    assert!(doctor.contains("active.lock"));
+
+    fs::remove_file(lock).unwrap();
+    project.rem_ok(&["add", "# Recovered\nlock was inspected and removed"]);
+    assert_eq!(memory_file_count(&project.vault), 1);
+    assert_git_clean(&project);
+}
+
+#[test]
+fn concurrent_mutations_never_clobber_a_successful_transaction() {
+    let project = TempProject::new("concurrent-mutations");
+    project.init_rem("local");
+    let barrier = Arc::new(Barrier::new(3));
+
+    let spawn_add = |body: &'static str| {
+        let barrier = Arc::clone(&barrier);
+        let rem_home = project.rem_home.clone();
+        let cwd = project.root.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            Command::new(env!("CARGO_BIN_EXE_rem"))
+                .env("REM_HOME", rem_home)
+                .current_dir(cwd)
+                .args([
+                    "add",
+                    "--source",
+                    "codex",
+                    "--source-id",
+                    "concurrent-event",
+                    body,
+                ])
+                .output()
+                .unwrap()
+        })
+    };
+
+    let first = spawn_add("# Concurrent A\nfirst process");
+    let second = spawn_add("# Concurrent B\nsecond process");
+    barrier.wait();
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    assert!(
+        first.status.success() || second.status.success(),
+        "both concurrent commands failed\nfirst: {}\nsecond: {}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(memory_file_count(&project.vault), 1);
+    assert_eq!(project.git_ok(&["rev-list", "--count", "HEAD"]).trim(), "2");
+    assert_git_clean(&project);
+    assert_eq!(
+        fs::read_dir(project.vault.join(".rem/tx")).unwrap().count(),
+        0
+    );
 }
 
 fn assert_git_clean(project: &TempProject) {

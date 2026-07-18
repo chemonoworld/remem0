@@ -404,6 +404,26 @@ pub fn extract(memory: &memory::Memory) -> Result<SemanticExtraction> {
     })
 }
 
+pub fn fact_is_current(fact: &SemanticFact) -> Result<bool> {
+    let at = now_unix_seconds();
+    if let Some(value) = fact.valid_from.as_deref()
+        && temporal_value_to_unix_seconds(value, fact.time_kind)? > at
+    {
+        return Ok(false);
+    }
+    if let Some(value) = fact.valid_to.as_deref()
+        && temporal_value_to_unix_seconds(value, fact.time_kind)? <= at
+    {
+        return Ok(false);
+    }
+    if let Some(value) = fact.expired_at.as_deref()
+        && temporal_value_to_unix_seconds(value, fact.time_kind)? <= at
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 pub fn insert_extraction(
     conn: &Connection,
     extraction: &SemanticExtraction,
@@ -1186,6 +1206,7 @@ mod tests {
                 tags: Vec::new(),
                 title: None,
                 source: Some("test".to_string()),
+                source_id: None,
                 agent: None,
                 session: None,
                 confidence: Some("0.9".to_string()),
@@ -1223,6 +1244,7 @@ mod tests {
                 tags: Vec::new(),
                 title: None,
                 source: Some("test".to_string()),
+                source_id: None,
                 agent: None,
                 session: None,
                 confidence: Some("1.0".to_string()),
@@ -1253,6 +1275,7 @@ mod tests {
                 tags: Vec::new(),
                 title: None,
                 source: Some("test".to_string()),
+                source_id: None,
                 agent: None,
                 session: None,
                 confidence: Some("1.0".to_string()),
@@ -1284,6 +1307,7 @@ mod tests {
                 tags: Vec::new(),
                 title: None,
                 source: Some("test".to_string()),
+                source_id: None,
                 agent: None,
                 session: None,
                 confidence: Some("1.0".to_string()),
@@ -1313,6 +1337,7 @@ mod tests {
                 tags: Vec::new(),
                 title: None,
                 source: Some("test".to_string()),
+                source_id: None,
                 agent: None,
                 session: None,
                 confidence: Some("1.0".to_string()),

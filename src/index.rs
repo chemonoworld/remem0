@@ -101,6 +101,31 @@ pub fn rebuild_to_path(workspace: &Workspace, index_path: &Path) -> Result<Rebui
         }
     }
 
+    let mut source_identities = BTreeMap::<(String, String), (String, String)>::new();
+    for memory in winners.values() {
+        let (Some(source), Some(source_id)) = (
+            memory.metadata.source.as_ref(),
+            memory.metadata.source_id.as_ref(),
+        ) else {
+            continue;
+        };
+        let key = (source.clone(), source_id.clone());
+        let path = memory_path_label(memory);
+        if let Some((existing_id, existing_path)) = source_identities.get(&key) {
+            diagnostics += 1;
+            insert_diagnostic(
+                &conn,
+                path,
+                "error",
+                format!(
+                    "duplicate source identity {source:?}/{source_id}; already used by memory {existing_id} at {existing_path}"
+                ),
+            )?;
+        } else {
+            source_identities.insert(key, (memory.metadata.id.clone(), path));
+        }
+    }
+
     let indexed = winners.len();
     for memory in winners.into_values() {
         insert_memory(&conn, &memory)?;
@@ -187,6 +212,7 @@ CREATE TABLE memories (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   source TEXT,
+  source_id TEXT,
   agent TEXT,
   session TEXT,
   confidence TEXT,
@@ -204,7 +230,7 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 );
 
 CREATE TABLE diagnostics (
-  path TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
   severity TEXT NOT NULL,
   message TEXT NOT NULL
 );
@@ -219,9 +245,9 @@ fn insert_memory(conn: &Connection, memory: &memory::Memory) -> Result<()> {
     conn.execute(
         "INSERT INTO memories (
             id, memory_type, scope, kind, status, title, body, path,
-            tags, created_at, updated_at, source, agent, session,
+            tags, created_at, updated_at, source, source_id, agent, session,
             confidence, promoted_from, supersedes
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             &memory.metadata.id,
             memory.metadata.memory_type.to_string(),
@@ -235,6 +261,7 @@ fn insert_memory(conn: &Connection, memory: &memory::Memory) -> Result<()> {
             &memory.metadata.created_at,
             &memory.metadata.updated_at,
             memory.metadata.source.as_deref(),
+            memory.metadata.source_id.as_deref(),
             memory.metadata.agent.as_deref(),
             memory.metadata.session.as_deref(),
             memory.metadata.confidence.as_deref(),

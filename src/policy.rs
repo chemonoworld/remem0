@@ -1,6 +1,6 @@
-use std::fs;
+use std::{fs, io};
 
-use color_eyre::eyre::{Result, WrapErr};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use crate::workspace::Workspace;
 
@@ -70,8 +70,21 @@ reusable procedure, or fact referenced by multiple sessions.
 
 fn write_if_missing(workspace: &Workspace, name: &str, content: &str) -> Result<()> {
     let path = workspace.policies_dir().join(name);
-    if path.exists() {
-        return Ok(());
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(eyre!(
+                "refusing to use symlinked policy file {}",
+                path.display()
+            ));
+        }
+        Ok(metadata) if metadata.is_file() => return Ok(()),
+        Ok(_) => {
+            return Err(eyre!("policy path {} must be a file", path.display()));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("failed to inspect {}", path.display()));
+        }
     }
     fs::write(&path, content.trim_start())
         .wrap_err_with(|| format!("failed to write {}", path.display()))

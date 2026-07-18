@@ -73,10 +73,13 @@ uninstall instructions.
 ## Commands
 
 ```sh
-cargo run -- add --short --tag rust "# Decision\nUse Markdown as canonical memory."
+cargo run -- add --short --tag rust $'# Decision\nUse Markdown as canonical memory.'
 cargo run -- list --short
 cargo run -- show <id-or-prefix>
-cargo run -- update <id-or-prefix> "# Updated\nSQLite is cache only."
+cargo run -- append <id-or-prefix> "New supporting context."
+cargo run -- update <id-or-prefix> $'# Updated\nSQLite is cache only.'
+cargo run -- supersede <id-or-prefix> $'# Replacement\nUse a newer decision.'
+cargo run -- review --non-interactive $'# Proposed\n@fact User | PREFERS | Helix'
 cargo run -- promote <short-id-or-prefix>
 cargo run -- delete <id-or-prefix>
 cargo run -- commit --message "sync manual vault edits"
@@ -88,10 +91,43 @@ cargo run -- facts --at 2025-04-01
 cargo run -- doctor
 ```
 
+The examples use Bash/zsh ANSI-C quoting (`$'...'`) so `\n` becomes a real
+newline. Plain double quotes keep `\n` as literal text, which means `@fact`
+must instead be entered on an actual new line.
+
 `rem commit` validates pending Markdown changes, rebuilds SQLite through a temp
 index, atomically replaces the local cache, and creates one Git commit. In
 non-interactive scripts, use `--accept-external` to include existing manual
 changes or `--restore-external` to discard them.
+
+Only one `rem` transaction may run against a vault at a time. A competing
+command fails without writing and reports `.rem/tx/active.lock`. If a crashed
+process leaves that lock behind, run `rem doctor`, confirm that no `rem`
+process is still using the vault, and only then remove the stale lock.
+
+### Explicit memory actions
+
+Each write action has one meaning:
+
+- `add` creates a new memory. Supplying `--source` and `--source-id` makes the
+  event idempotent: the identical body returns `no-op`; a changed body tells
+  the caller to use `update <id>` explicitly.
+- `append <id> <TEXT>` adds a follow-up paragraph while preserving the current
+  body.
+- `update <id> <TEXT>` replaces the body. An unchanged body returns `no-op`.
+- `supersede <id> <TEXT>` creates a replacement memory and records the old ID
+  in its `supersedes` frontmatter. The old memory becomes `superseded` and is
+  retained as immutable provenance.
+- `review` never writes. It reports a candidate and a recommended action; the
+  caller must subsequently run `add`, `append`, `update`, or `supersede`.
+
+`review --id <id> <TEXT>` evaluates an explicit update target. Without `--id`,
+`review --scope <user|project|agent|session> <TEXT>` first detects an exact
+body duplicate, then compares current `@fact` directives in the same scope.
+It recommends `append` for the same fact, `supersede` for a changed
+exclusive-current relation such as `PREFERS` or `WORKS_AT`, and `add` for
+compatible facts or ambiguous candidates. It uses deterministic Markdown fact
+parsing, not embeddings, and does not alter Markdown, SQLite, or Git.
 
 Use `cargo run -- commit --review` to inspect dirty Git working-tree changes
 before committing. The review flow can show diffs, include all changes, restore
@@ -99,10 +135,11 @@ all changes, or walk each file and choose include/restore. If Git reports
 unmerged conflict states, resolve them with Git/editor tooling first and then
 rerun `rem commit --review`.
 
-Semantic memory conflict review is intentionally separate and still TODO:
-duplicate memory IDs, sync-conflict copies, and contradictory long-term memories
-should get a dedicated memory-aware review workflow rather than being solved by
-the Git dirty-state review.
+Git conflict handling and semantic review remain separate. `rem review` covers
+only deterministic fact candidates. Duplicate memory IDs, sync-conflict copies,
+entity resolution, vector/LLM similarity, and automatic temporal validity
+closure remain future semantic-review work; Git unmerged states must still be
+resolved with Git/editor tooling before `rem commit`.
 
 `rem search` uses the configured `default-search` mode when no explicit search
 flag is provided. Explicit BM25 search requires a current index; run
