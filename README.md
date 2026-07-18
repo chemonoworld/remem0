@@ -134,7 +134,12 @@ remaining fields identify the source memory, path, episode, and excerpt.
 `default-search` use an option picker rather than free-form text. `profile-root`
 still accepts a typed path; select that field and press `Ctrl-F` to open a fuzzy
 directory finder that recursively searches readable, non-symlink directories
-under `$HOME` in the background.
+under the user's `$HOME` in the background. Its editable path filter starts
+pre-filled with `$HOME`, so you can backspace from that path or press `Ctrl-A`
+to replace it. Every character (including `j` and `k`) narrows the results.
+Press `Tab` or `Shift-Tab` to move focus to the path list; arrows or `j`/`k`
+then move the path cursor. Press `Tab` again to return to the filter and
+`Enter` to choose the current path.
 
 `S`/`s` writes the configuration independently of vault initialization, so a
 new root can be recorded before it is a valid Git-backed vault. `I` attempts

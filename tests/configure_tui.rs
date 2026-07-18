@@ -43,8 +43,12 @@ send -- "\033\[B"
 after 100
 send -- "\006"
 after 800
-send -- "finder-target"
+send -- "\001"
+after 100
+send -- "finder-jk-target"
 after 500
+send -- "\t"
+after 100
 send -- "\r"
 after 100
 send -- "\033\[B"
@@ -106,7 +110,7 @@ fn configure_tui_first_run_persists_finder_and_picker_values() {
     }
 
     let project = TempTuiProject::new("first-run");
-    let target = project.home.join("outside-work/alpha/finder-target");
+    let target = project.home.join("outside-work/alpha/finder-jk-target");
     fs::create_dir_all(&target).unwrap();
 
     let output = project.configure_with_expect();

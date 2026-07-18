@@ -217,10 +217,17 @@ struct RootFinder {
     candidates: Vec<PathBuf>,
     matches: Vec<usize>,
     selected: usize,
+    focus: RootFinderFocus,
     receiver: Receiver<PathBuf>,
     scanning: bool,
     cancellation: Arc<AtomicBool>,
     refilter_cursor: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootFinderFocus {
+    Filter,
+    Paths,
 }
 
 impl RootFinder {
@@ -229,14 +236,16 @@ impl RootFinder {
         let cancellation = Arc::new(AtomicBool::new(false));
         let scanner_cancellation = Arc::clone(&cancellation);
         let scanner_root = search_root.clone();
+        let query = search_root.display().to_string();
         std::thread::spawn(move || scan_directories(scanner_root, sender, scanner_cancellation));
 
         Self {
             candidates: vec![search_root.clone()],
             matches: vec![0],
             search_root,
-            query: String::new(),
+            query,
             selected: 0,
+            focus: RootFinderFocus::Filter,
             receiver,
             scanning: true,
             cancellation,
@@ -303,17 +312,28 @@ impl RootFinder {
         }
     }
 
+    fn toggle_focus(&mut self) -> RootFinderFocus {
+        self.focus = match self.focus {
+            RootFinderFocus::Filter => RootFinderFocus::Paths,
+            RootFinderFocus::Paths => RootFinderFocus::Filter,
+        };
+        self.focus
+    }
+
     fn push_query(&mut self, value: &str) {
+        self.focus = RootFinderFocus::Filter;
         self.query.push_str(value);
         self.reset_filter();
     }
 
     fn pop_query(&mut self) {
+        self.focus = RootFinderFocus::Filter;
         self.query.pop();
         self.reset_filter();
     }
 
     fn clear_query(&mut self) {
+        self.focus = RootFinderFocus::Filter;
         self.query.clear();
         self.reset_filter();
     }
@@ -350,8 +370,9 @@ impl ConfigApp {
             picker: None,
             root_finder: None,
             finder_root,
-            message: "Arrows move. Enter applies a field. S saves config. Ctrl-F searches HOME."
-                .to_string(),
+            message:
+                "Arrows move. Enter applies a field. S saves config. Ctrl-F opens the HOME path finder."
+                    .to_string(),
             selected: 0,
             should_quit: false,
             dirty: false,
@@ -510,19 +531,41 @@ impl ConfigApp {
             return;
         }
 
+        let paths_focused = self
+            .root_finder
+            .as_ref()
+            .is_some_and(|finder| finder.focus == RootFinderFocus::Paths);
+
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => self
+            KeyCode::Tab | KeyCode::BackTab => {
+                let focus = self
+                    .root_finder
+                    .as_mut()
+                    .expect("root finder checked")
+                    .toggle_focus();
+                self.message = match focus {
+                    RootFinderFocus::Filter => {
+                        "Directory finder path filter focused. Edit the HOME path; Tab focuses paths."
+                            .to_string()
+                    }
+                    RootFinderFocus::Paths => {
+                        "Directory finder paths focused. Use arrows or j/k; Tab returns to filter."
+                            .to_string()
+                    }
+                };
+            }
+            KeyCode::Down | KeyCode::Char('j') if paths_focused => self
                 .root_finder
                 .as_mut()
                 .expect("root finder checked")
                 .move_selection(1),
-            KeyCode::Up | KeyCode::Char('k') => self
+            KeyCode::Up | KeyCode::Char('k') if paths_focused => self
                 .root_finder
                 .as_mut()
                 .expect("root finder checked")
                 .move_selection(-1),
             KeyCode::Enter => self.commit_root_finder(),
-            KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+            KeyCode::Esc => {
                 self.root_finder = None;
                 self.message = "Directory finder cancelled.".to_string();
             }
@@ -620,7 +663,7 @@ impl ConfigApp {
         };
         self.root_finder = Some(RootFinder::new(search_root));
         self.message =
-            "Directory finder: searching HOME in the background; type to filter, Enter selects."
+            "Directory finder: HOME path is prefilled; edit it to narrow results, Tab focuses paths."
                 .to_string();
     }
 
@@ -820,7 +863,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &ConfigApp, area: Rect) {
     let footer = Paragraph::new(vec![
         Line::from(app.message.clone()),
         Line::from("Enter apply/select  S save config  I init vault  R reset  Q quit"),
-        Line::from("profile-root: Ctrl-F searches directories under HOME"),
+        Line::from("profile-root: Ctrl-F opens an editable HOME path filter; Tab focuses paths"),
     ])
     .wrap(Wrap { trim: true })
     .block(Block::default().borders(Borders::TOP));
@@ -894,7 +937,15 @@ fn render_root_finder(frame: &mut Frame<'_>, area: Rect, finder: &RootFinder) {
         .constraints([Constraint::Length(4), Constraint::Min(4)])
         .split(modal);
     let query = Paragraph::new(vec![
-        Line::from(format!("search: {}", finder.query)),
+        Line::from(format!(
+            "path filter{}: {}",
+            if finder.focus == RootFinderFocus::Filter {
+                " [focused]"
+            } else {
+                ""
+            },
+            finder.query
+        )),
         Line::from(format!(
             "{} · {} matches under {}",
             if finder.refilter_cursor.is_some() {
@@ -907,11 +958,18 @@ fn render_root_finder(frame: &mut Frame<'_>, area: Rect, finder: &RootFinder) {
             matching_count,
             finder.search_root.display()
         )),
-        Line::from("Type to fuzzy filter · arrows/jk move · Enter select · Esc cancel"),
+        Line::from(match finder.focus {
+            RootFinderFocus::Filter => {
+                "Edit the HOME path or type freely (including j/k) · Ctrl-A clears · Tab focuses paths · Enter selects · Esc cancels"
+            }
+            RootFinderFocus::Paths => {
+                "Paths [focused]: arrows/jk move · Tab returns to filter · Enter selects · Esc cancels"
+            }
+        }),
     ])
     .block(
         Block::default()
-            .title(" Find profile root ")
+            .title(format!(" Find profile root · {} ", finder.search_root.display()))
             .borders(Borders::ALL),
     )
     .wrap(Wrap { trim: true });
@@ -920,7 +978,15 @@ fn render_root_finder(frame: &mut Frame<'_>, area: Rect, finder: &RootFinder) {
         .map(|path| ListItem::new(path.display().to_string()))
         .collect::<Vec<_>>();
     let list = List::new(items)
-        .block(Block::default().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM))
+        .block(
+            Block::default()
+                .title(if finder.focus == RootFinderFocus::Paths {
+                    " Paths [focused] "
+                } else {
+                    " Paths (Tab to focus) "
+                })
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
+        )
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -929,7 +995,10 @@ fn render_root_finder(frame: &mut Frame<'_>, area: Rect, finder: &RootFinder) {
         )
         .highlight_symbol(">");
     let mut state = ListState::default();
-    state.select((!matching.is_empty()).then_some(finder.selected - matching_offset));
+    state.select(
+        (finder.focus == RootFinderFocus::Paths && !matching.is_empty())
+            .then_some(finder.selected - matching_offset),
+    );
 
     frame.render_widget(Clear, modal);
     frame.render_widget(query, chunks[0]);
@@ -1218,6 +1287,7 @@ mod tests {
         app.handle_key(ctrl('f'), &store);
         assert!(app.root_finder.is_some());
         wait_for_finder_candidate(&mut app, &picked_root);
+        app.handle_key(ctrl('a'), &store);
         for character in "picked-directory".chars() {
             app.handle_key(key(KeyCode::Char(character)), &store);
         }
@@ -1225,6 +1295,68 @@ mod tests {
         app.handle_key(key(KeyCode::Enter), &store);
 
         assert_eq!(active_profile(&app.config).root, picked_root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_finder_prefills_home_path_and_uses_tab_for_path_focus() {
+        let (store, root) = temp_store("finder-focus");
+        let finder_root = root.join("home");
+        let first = finder_root.join("j-k-first");
+        let second = finder_root.join("j-k-second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let mut app = ConfigApp::with_finder_root(
+            AppConfig::default(),
+            store.path().to_path_buf(),
+            Some(finder_root.clone()),
+        );
+        select_field(&mut app, Field::ProfileRoot);
+        app.handle_key(ctrl('f'), &store);
+        wait_for_finder_candidate(&mut app, &first);
+        wait_for_finder_candidate(&mut app, &second);
+
+        assert_eq!(
+            app.root_finder.as_ref().expect("finder is open").query,
+            finder_root.display().to_string()
+        );
+        app.handle_key(ctrl('a'), &store);
+        app.handle_key(key(KeyCode::Char('j')), &store);
+        app.handle_key(key(KeyCode::Char('k')), &store);
+        for _ in 0..100 {
+            app.poll_root_finder();
+            if app
+                .root_finder
+                .as_ref()
+                .is_some_and(|finder| finder.refilter_cursor.is_none() && finder.matches.len() >= 2)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let finder = app.root_finder.as_ref().expect("finder is open");
+        assert_eq!(finder.query, "jk");
+        assert_eq!(finder.focus, RootFinderFocus::Filter);
+        assert!(finder.matches.len() >= 2);
+
+        app.handle_key(key(KeyCode::Tab), &store);
+        let selected = app.root_finder.as_ref().expect("finder is open").selected;
+        assert_eq!(
+            app.root_finder.as_ref().expect("finder is open").focus,
+            RootFinderFocus::Paths
+        );
+        app.handle_key(key(KeyCode::Char('j')), &store);
+        let finder = app.root_finder.as_ref().expect("finder is open");
+        assert_eq!(finder.query, "jk");
+        assert_ne!(finder.selected, selected);
+
+        app.handle_key(key(KeyCode::BackTab), &store);
+        app.handle_key(key(KeyCode::Char('k')), &store);
+        let finder = app.root_finder.as_ref().expect("finder is open");
+        assert_eq!(finder.focus, RootFinderFocus::Filter);
+        assert_eq!(finder.query, "jkk");
+        app.root_finder = None;
         fs::remove_dir_all(root).unwrap();
     }
 
