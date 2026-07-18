@@ -72,6 +72,11 @@ uninstall instructions.
 
 ## Commands
 
+`rem --help` groups the command surface by purpose: setup and configuration,
+reading and search, creating and changing memories, review and maintenance, and
+command help. Existing command names remain available directly, and
+`rem help <command>` shows the detailed options for one command.
+
 ```sh
 cargo run -- add --short --tag rust $'# Decision\nUse Markdown as canonical memory.'
 cargo run -- list --short

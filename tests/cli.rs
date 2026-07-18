@@ -533,6 +533,64 @@ fn tui_alias_is_not_a_supported_command() {
 }
 
 #[test]
+fn root_help_groups_commands_by_purpose() {
+    let project = TempProject::new("grouped-root-help");
+    let help = project.rem_ok(&["--help"]);
+
+    let setup = help.find("Setup & Configuration:").unwrap();
+    let read = help.find("Read & Search:").unwrap();
+    let create = help.find("Create & Change:").unwrap();
+    let review = help.find("Review & Maintenance:").unwrap();
+    let command_help = help.find("Help:").unwrap();
+    let options = help.find("Options:").unwrap();
+    assert!(setup < read && read < create && create < review);
+    assert!(review < command_help && command_help < options);
+
+    let setup_section = &help[setup..read];
+    for command in ["configure", "init", "profile", "config"] {
+        assert!(setup_section.contains(&format!("  {command}")));
+    }
+
+    let read_section = &help[read..create];
+    for command in ["list", "show", "search", "facts"] {
+        assert!(read_section.contains(&format!("  {command}")));
+    }
+
+    let create_section = &help[create..review];
+    for command in [
+        "add",
+        "append",
+        "update",
+        "edit",
+        "supersede",
+        "promote",
+        "delete",
+    ] {
+        assert!(create_section.contains(&format!("  {command}")));
+    }
+
+    let review_section = &help[review..command_help];
+    for command in ["review", "commit", "rebuild", "doctor"] {
+        assert!(review_section.contains(&format!("  {command}")));
+    }
+
+    assert!(!help.contains("\nCommands:\n"));
+    assert!(help.contains("--color <COLOR>"));
+    assert!(help.contains("--version"));
+}
+
+#[test]
+fn grouped_root_help_preserves_subcommand_help_routes() {
+    let project = TempProject::new("grouped-help-routes");
+    let direct = project.rem_ok(&["add", "--help"]);
+    let delegated = project.rem_ok(&["help", "add"]);
+
+    assert!(direct.contains("Usage: rem add"));
+    assert!(direct.contains("--source-id"));
+    assert_eq!(delegated, direct);
+}
+
+#[test]
 fn expected_user_errors_are_concise() {
     let project = TempProject::new("concise-errors");
     project.init_rem("local");

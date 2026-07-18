@@ -1,6 +1,11 @@
-use std::{fmt, path::PathBuf};
+use std::{
+    fmt::{self, Write as _},
+    path::PathBuf,
+};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{
+    Args, Command as ClapCommand, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+};
 
 use crate::{
     config::StorageMode,
@@ -9,6 +14,49 @@ use crate::{
     search::SearchMode,
 };
 
+const ROOT_HELP_TEMPLATE: &str = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+{before-help}Options:
+{options}";
+
+struct CommandCategory {
+    heading: &'static str,
+    commands: &'static [&'static str],
+}
+
+const COMMAND_CATEGORIES: &[CommandCategory] = &[
+    CommandCategory {
+        heading: "Setup & Configuration",
+        commands: &["configure", "init", "profile", "config"],
+    },
+    CommandCategory {
+        heading: "Read & Search",
+        commands: &["list", "show", "search", "facts"],
+    },
+    CommandCategory {
+        heading: "Create & Change",
+        commands: &[
+            "add",
+            "append",
+            "update",
+            "edit",
+            "supersede",
+            "promote",
+            "delete",
+        ],
+    },
+    CommandCategory {
+        heading: "Review & Maintenance",
+        commands: &["review", "commit", "rebuild", "doctor"],
+    },
+    CommandCategory {
+        heading: "Help",
+        commands: &["help"],
+    },
+];
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rem",
@@ -16,10 +64,93 @@ use crate::{
     about = "Local-first Markdown memory CLI for humans and agents."
 )]
 pub struct Cli {
-    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ColorChoice::Auto,
+        help = "Control when ANSI color is used."
+    )]
     pub color: ColorChoice,
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    pub fn parse_grouped() -> Self {
+        let matches = Self::grouped_command().get_matches();
+        Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    }
+
+    fn grouped_command() -> ClapCommand {
+        let mut command = <Self as CommandFactory>::command();
+        command.build();
+        let grouped_help = render_grouped_commands(&command);
+
+        command
+            .before_help(grouped_help)
+            .help_template(ROOT_HELP_TEMPLATE)
+    }
+}
+
+fn render_grouped_commands(command: &ClapCommand) -> String {
+    let visible_commands = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .collect::<Vec<_>>();
+    let name_width = visible_commands
+        .iter()
+        .map(|subcommand| subcommand.get_name().len())
+        .max()
+        .unwrap_or_default();
+    let mut help = String::new();
+
+    for category in COMMAND_CATEGORIES {
+        let commands = category
+            .commands
+            .iter()
+            .filter_map(|name| {
+                visible_commands
+                    .iter()
+                    .find(|subcommand| subcommand.get_name() == *name)
+            })
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            continue;
+        }
+
+        let _ = writeln!(help, "{}:", category.heading);
+        for subcommand in commands {
+            let about = subcommand
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = writeln!(help, "  {:name_width$}  {about}", subcommand.get_name());
+        }
+        help.push('\n');
+    }
+
+    let uncategorized = visible_commands
+        .iter()
+        .filter(|subcommand| {
+            !COMMAND_CATEGORIES
+                .iter()
+                .any(|category| category.commands.contains(&subcommand.get_name()))
+        })
+        .collect::<Vec<_>>();
+    if !uncategorized.is_empty() {
+        let _ = writeln!(help, "Other:");
+        for subcommand in uncategorized {
+            let about = subcommand
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = writeln!(help, "  {:name_width$}  {about}", subcommand.get_name());
+        }
+        help.push('\n');
+    }
+
+    help.trim_end().to_owned()
 }
 
 #[derive(Debug, Subcommand)]
@@ -473,5 +604,40 @@ mod tests {
         args.source_id = None;
         args.tags.push("durable".to_string());
         assert!(args.has_metadata_overrides());
+    }
+
+    #[test]
+    fn command_categories_cover_every_visible_subcommand_once() {
+        let mut command = <Cli as CommandFactory>::command();
+        command.build();
+
+        for subcommand in command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+        {
+            let category_count = COMMAND_CATEGORIES
+                .iter()
+                .filter(|category| category.commands.contains(&subcommand.get_name()))
+                .count();
+            assert_eq!(
+                category_count,
+                1,
+                "top-level command {:?} must belong to exactly one help category",
+                subcommand.get_name()
+            );
+        }
+
+        for category in COMMAND_CATEGORIES {
+            for name in category.commands {
+                assert!(
+                    command
+                        .get_subcommands()
+                        .any(|subcommand| !subcommand.is_hide_set()
+                            && subcommand.get_name() == *name),
+                    "help category {:?} references missing command {name:?}",
+                    category.heading
+                );
+            }
+        }
     }
 }

@@ -15,7 +15,6 @@ mod workspace;
 
 use std::{env, path::Path, process::Command as ProcessCommand};
 
-use clap::Parser;
 use cli::{Cli, Command, ConfigCommand, ConfigKey, ProfileCommand};
 use color_eyre::eyre::{Result, eyre};
 use config::{AppConfig, ConfigStore, ProfileConfig, StorageMode, normalize_root};
@@ -33,7 +32,7 @@ fn main() {
 
 fn run() -> Result<()> {
     color_eyre::install()?;
-    let cli = Cli::parse();
+    let cli = Cli::parse_grouped();
     output::configure(cli.color);
     let store = ConfigStore::new()?;
 
